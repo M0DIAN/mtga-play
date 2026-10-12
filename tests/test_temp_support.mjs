@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,12 +12,13 @@ const childEnv = { ...process.env };
 // The deliberate failures belong to a separate test run with its own exit code.
 delete childEnv.NODE_TEST_CONTEXT;
 
-test('test hooks clean initialized and failed fixtures even when session close rejects', async t => {
+test('test hooks clean all fixtures even when initialization or an earlier close rejects', async t => {
   const directory = await makeTestDirectory(t, 'mtga-temp-support-');
   const root = join(directory, 'fixtures');
   await mkdir(root);
   await writeFile(join(root, 'historical.txt'), 'Preserve another run.');
   const entry = join(directory, 'cleanup.test.mjs');
+  const followingClose = join(directory, 'following-close.txt');
   await writeFile(entry, `
     import { test } from 'node:test';
     import { writeFile } from 'node:fs/promises';
@@ -30,6 +31,12 @@ test('test hooks clean initialized and failed fixtures even when session close r
         await writeFile(join(directory, 'state.json'), '{}');
         if (failure === 'initialization') throw new Error('simulated initialization failure');
         session = { close() { if (failure === 'close') throw new Error('simulated close failure'); } };
+        if (failure === 'close') {
+          const following = await makeTestDirectory(t, 'fixture-', async () => {
+            await writeFile(${JSON.stringify(followingClose)}, 'following fixture closed');
+          });
+          await writeFile(join(following, 'state.json'), '{}');
+        }
       });
     }
   `);
@@ -41,6 +48,7 @@ test('test hooks clean initialized and failed fixtures even when session close r
     assert.match(error.stdout, /simulated close failure/);
     return true;
   });
+  assert.equal(await readFile(followingClose, 'utf8'), 'following fixture closed');
   assert.deepEqual(await readdir(root), ['historical.txt']);
 });
 

@@ -36,6 +36,19 @@ class TestDirectoryTests(unittest.TestCase):
             self.assertEqual(list(Path(parent).iterdir()), [blocked])
             self.assertEqual(blocked.read_text(encoding='utf-8'), 'keep')
 
+    def test_cleanup_denial_preserves_evidence_without_changing_permissions(self):
+        with test_directory() as parent:
+            root = Path(parent) / 'explicit-root'
+            with patch.dict(os.environ, {'MTGA_TEST_TMP': str(root)}):
+                with patch('os.unlink', side_effect=PermissionError(13, 'simulated cleanup denial')), \
+                        patch('os.chmod') as chmod:
+                    with self.assertRaisesRegex(PermissionError, 'simulated cleanup denial'):
+                        with test_directory() as directory:
+                            child = Path(directory)
+                            (child / 'Player.log').write_bytes(b'synthetic test data')
+                    chmod.assert_not_called()
+                self.assertEqual((child / 'Player.log').read_bytes(), b'synthetic test data')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -37,7 +37,7 @@ python -B -X utf8 tests/run_offline.py --output 'E:\MTGA\skill_evaluations\mtga-
 
 入口将子进程的 `MTGA_TEST_TMP` 指向本次输出目录下的 `test-tmp`，将 `MTGA_PYTHON` 设为启动入口的 Python。在正式测试前，使用实际 Python/Node 子进程验证该目录的创建、写入、追加、读取、重命名和删除。预检失败保留错误并停止，不修改权限、不静默换目录、不跳过失败用例。
 
-输出含 `offline-report.json`、各条命令的原始 stdout/stderr、退出码、进程耗时和清理状态。退出码 0 表示所选套件及清理通过，1 表示正式测试或清理未通过，2 表示预检/环境阻塞；结合原始异常判断原因。原始用例数量和失败/跳过项见 stdout/stderr，不把进程退出码等同于已验证实战。`--suite python` 或 `--suite javascript` 可只运行对应套件；后者仍预检 Python，因为 bootstrap 测试会调用它。
+输出含 `offline-report.json`、各条命令的原始 stdout/stderr、退出码、进程耗时和清理状态。报告写入被拒时，仍向控制台 stdout 输出包含原始阻塞及保存错误的 JSON。退出码 0 表示所选套件及清理通过，1 表示正式测试或清理未通过，2 表示预检/环境或报告保存阻塞；结合原始异常判断原因。原始用例数量和失败/跳过项见 stdout/stderr；入口同时向 stderr 回显正式套件的输出，成功 CI 也可核对用例数量和跳过项。不把进程退出码等同于已验证实战。`--suite python` 或 `--suite javascript` 可只运行对应套件；后者仍预检 Python，因为 bootstrap 测试会调用它。
 
 单独运行测试时，所有文件 fixture 都遵守 `MTGA_TEST_TMP`；未设置时默认使用当前目录的 `.mtga-test-tmp/`。Python 与 JS 使用相同约定，已设置却不可用时直接失败。每个 fixture 仅删除自己创建的目录，异常初始化或会话关闭错误也会尝试清理；失败残留会明确报告，不删除历史记录。Windows 本机验收应使用上面的统一入口，避免把临时文件写回已安装的 skill。
 

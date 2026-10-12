@@ -13,8 +13,9 @@ SOURCE = Path(__file__).resolve().parents[1]
 PYTHON_PROBE = '''
 from pathlib import Path
 import sys
-from tempfile import TemporaryDirectory
-with TemporaryDirectory(dir=sys.argv[1], prefix='probe-python-') as directory:
+from tempfile import mkdtemp
+directory = Path(mkdtemp(dir=sys.argv[1], prefix='probe-python-'))
+try:
     path = Path(directory) / 'Player.log'
     path.write_bytes(b'probe')
     with path.open('ab') as stream:
@@ -23,6 +24,10 @@ with TemporaryDirectory(dir=sys.argv[1], prefix='probe-python-') as directory:
     renamed = path.with_name('renamed.log')
     path.replace(renamed)
     renamed.unlink()
+finally:
+    for path in directory.iterdir():
+        path.unlink()
+    directory.rmdir()
 print('create/write/append/read/rename/delete/cleanup: PASS')
 '''
 NODE_PROBE = '''
@@ -37,7 +42,10 @@ try {
   const renamed = path.join(directory, 'renamed.log');
   fs.renameSync(file, renamed);
   fs.unlinkSync(renamed);
-} finally { fs.rmSync(directory, { recursive: true }); }
+} finally {
+  for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
+  fs.rmdirSync(directory);
+}
 console.log('create/write/append/read/rename/delete/cleanup: PASS');
 '''
 
@@ -57,7 +65,7 @@ def command_record(name, argv, output, environment, timeout):
     except (OSError, subprocess.TimeoutExpired) as error:
         record['error'] = f'{type(error).__name__}: {error}'
     record['elapsed_s'] = round(time.monotonic() - started, 6)
-    if record['exit_code'] != 0:
+    if name in ('python', 'javascript') or record['exit_code'] != 0:
         for key in ('stdout_path', 'stderr_path'):
             path = Path(record[key])
             if path.is_file():
@@ -127,7 +135,13 @@ def main():
     if report['status'] == 'PASS' and report['cleanup']['status'] != 'PASS':
         report['status'] = 'FAIL'
     text = json.dumps(report, ensure_ascii=False, indent=2) + '\n'
-    (output / 'offline-report.json').write_text(text, encoding='utf-8')
+    try:
+        (output / 'offline-report.json').write_text(text, encoding='utf-8')
+    except OSError as error:
+        report['status_before_report_write'] = report['status']
+        report['status'] = 'BLOCKED'
+        report['report_write_error'] = f'{type(error).__name__}: {error}'
+        text = json.dumps(report, ensure_ascii=False, indent=2) + '\n'
     print(text, end='')
     return {'PASS': 0, 'FAIL': 1, 'BLOCKED': 2}[report['status']]
 
