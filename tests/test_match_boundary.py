@@ -197,6 +197,27 @@ class MatchBoundaryTests(unittest.TestCase):
         self.assertEqual(tracker.match_key, key('match-A'))
         self.assertTrue(tracker.snapshot()['coverage']['continuous'])
 
+    def test_unseen_room_cannot_permanently_retire_unfinished_match(self):
+        # An EOF/bounded start can first encounter B, with no record of A.
+        for other_state in ('MatchCompleted', 'Playing'):
+            with self.subTest(other_state=other_state):
+                tracker = GameTracker()
+                tracker.process(full('match-B', 1))
+                before = tracker.snapshot()
+                tracker.process(room('match-A', other_state))
+                self.assertNotIn(key('match-B'), tracker.retired_match_keys)
+                if other_state == 'MatchCompleted':
+                    self.assertEqual(tracker.snapshot(), before)
+                tracker.process(room('match-B'))
+                tracker.process(full('match-B', 1, state_id=2))
+                tracker.process(request(1, state_id=2))
+                snapshot = tracker.snapshot()
+                self.assertEqual(snapshot['match_key'], key('match-B'))
+                self.assertEqual(snapshot['game_state_id'], 2)
+                self.assertTrue(snapshot['coverage']['continuous'])
+                document = {'live': True, 'caught_up': True, 'checked_at': STAMP, 'state': snapshot}
+                self.assertTrue(decision_readiness(document, now=1791806400)['ready_for_action'])
+
     def test_start_at_end_skips_only_initial_history_then_reads_and_recovers(self):
         with test_directory() as tmp:
             path = Path(tmp) / 'Player.log'

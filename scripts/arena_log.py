@@ -178,7 +178,7 @@ class GameTracker:
 
     def change_match(self, match_key):
         retired = self.retired_match_keys
-        if self.match_key is not None:
+        if self.match_key is not None and self.room_state == 'MatchGameRoomStateType_MatchCompleted':
             retired.append(self.match_key)
         self.reset(match_key)
         self.retired_match_keys = retired
@@ -403,6 +403,11 @@ class GameTracker:
             if match_key in self.retired_match_keys:
                 return [{'type': 'previous_match_ignored', 'match_key': match_key}]
             if match_key != self.match_key:
+                if self.match_key is not None and room.get('state') == 'MatchGameRoomStateType_MatchCompleted':
+                    # Bootstrap/EOF may omit an older match's identity. Its
+                    # late completion cannot retire the already observed game.
+                    self.retired_match_keys.append(match_key)
+                    return [{'type': 'other_match_completed', 'match_key': match_key}]
                 self.change_match(match_key)
             self.room_state = room['state']
             self.last_received_timestamp = event.get('timestamp') or self.last_received_timestamp
