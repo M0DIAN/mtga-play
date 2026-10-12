@@ -1,0 +1,358 @@
+{
+  "provenance": {
+    "session_id": "match_20261012_124245_fb857612",
+    "source": "Actual public ability object and own legally viewed SelectNReq cards, assembled with minimal zones; not a full match fixture"
+  },
+  "events": [
+    {
+      "kind": "gre",
+      "message": {
+        "type": "GREMessageType_GameStateMessage",
+        "systemSeatIds": [
+          1
+        ],
+        "gameStateMessage": {
+          "type": "GameStateType_Full",
+          "gameStateId": 231,
+          "gameInfo": {
+            "gameNumber": 1
+          },
+          "players": [
+            {
+              "systemSeatNumber": 1
+            },
+            {
+              "systemSeatNumber": 2
+            }
+          ],
+          "zones": [
+            {
+              "zoneId": 28,
+              "type": "ZoneType_Battlefield"
+            },
+            {
+              "zoneId": 27,
+              "type": "ZoneType_Stack",
+              "objectInstanceIds": [
+                306
+              ]
+            },
+            {
+              "zoneId": 31,
+              "type": "ZoneType_Hand",
+              "ownerSeatId": 1
+            },
+            {
+              "zoneId": 32,
+              "type": "ZoneType_Library",
+              "ownerSeatId": 1,
+              "objectInstanceIds": [
+                174,
+                175,
+                176,
+                177,
+                178,
+                179,
+                180
+              ]
+            }
+          ],
+          "gameObjects": [
+            {
+              "instanceId": 306,
+              "grpId": 100685,
+              "type": "GameObjectType_Ability",
+              "zoneId": 27,
+              "visibility": "Visibility_Public",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "objectSourceGrpId": 90667,
+              "parentId": 302
+            },
+            {
+              "instanceId": 174,
+              "grpId": 96836,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "superTypes": [
+                "SuperType_Basic"
+              ],
+              "cardTypes": [
+                "CardType_Land"
+              ],
+              "subtypes": [
+                "SubType_Plains"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 648,
+              "overlayGrpId": 96836,
+              "uniqueAbilities": [
+                {
+                  "id": 28,
+                  "grpId": 1001
+                }
+              ]
+            },
+            {
+              "instanceId": 175,
+              "grpId": 94899,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "cardTypes": [
+                "CardType_Enchantment"
+              ],
+              "color": [
+                "CardColor_Black"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 879025,
+              "overlayGrpId": 94899,
+              "uniqueAbilities": [
+                {
+                  "id": 34,
+                  "grpId": 354
+                },
+                {
+                  "id": 35,
+                  "grpId": 176469
+                },
+                {
+                  "id": 36,
+                  "grpId": 176470
+                }
+              ]
+            },
+            {
+              "instanceId": 176,
+              "grpId": 94899,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "cardTypes": [
+                "CardType_Enchantment"
+              ],
+              "color": [
+                "CardColor_Black"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 879025,
+              "overlayGrpId": 94899,
+              "uniqueAbilities": [
+                {
+                  "id": 37,
+                  "grpId": 354
+                },
+                {
+                  "id": 38,
+                  "grpId": 176469
+                },
+                {
+                  "id": 39,
+                  "grpId": 176470
+                }
+              ]
+            },
+            {
+              "instanceId": 177,
+              "grpId": 95196,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "superTypes": [
+                "SuperType_Basic"
+              ],
+              "cardTypes": [
+                "CardType_Land"
+              ],
+              "subtypes": [
+                "SubType_Swamp"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 653,
+              "overlayGrpId": 95196,
+              "uniqueAbilities": [
+                {
+                  "id": 75,
+                  "grpId": 1003
+                }
+              ]
+            },
+            {
+              "instanceId": 178,
+              "grpId": 87141,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "cardTypes": [
+                "CardType_Artifact"
+              ],
+              "color": [
+                "CardColor_White"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 737054,
+              "overlayGrpId": 87141,
+              "uniqueAbilities": [
+                {
+                  "id": 82,
+                  "grpId": 95354
+                },
+                {
+                  "id": 83,
+                  "grpId": 141939
+                },
+                {
+                  "id": 84,
+                  "grpId": 76729
+                }
+              ]
+            },
+            {
+              "instanceId": 179,
+              "grpId": 96601,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "cardTypes": [
+                "CardType_Artifact"
+              ],
+              "color": [
+                "CardColor_White"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 1055542,
+              "overlayGrpId": 96601,
+              "uniqueAbilities": [
+                {
+                  "id": 78,
+                  "grpId": 190870
+                },
+                {
+                  "id": 79,
+                  "grpId": 190871
+                }
+              ]
+            },
+            {
+              "instanceId": 180,
+              "grpId": 95196,
+              "type": "GameObjectType_Card",
+              "zoneId": 32,
+              "visibility": "Visibility_Private",
+              "ownerSeatId": 1,
+              "controllerSeatId": 1,
+              "superTypes": [
+                "SuperType_Basic"
+              ],
+              "cardTypes": [
+                "CardType_Land"
+              ],
+              "subtypes": [
+                "SubType_Swamp"
+              ],
+              "viewers": [
+                1
+              ],
+              "name": 653,
+              "overlayGrpId": 95196,
+              "uniqueAbilities": [
+                {
+                  "id": 73,
+                  "grpId": 1003
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "gre",
+      "message": {
+        "type": "GREMessageType_SelectNReq",
+        "systemSeatIds": [
+          1
+        ],
+        "msgId": 311,
+        "gameStateId": 231,
+        "prompt": {
+          "promptId": 13883,
+          "parameters": [
+            {
+              "parameterName": "CardId",
+              "type": "ParameterType_Number",
+              "numberValue": 340
+            },
+            {
+              "parameterName": "CardId",
+              "type": "ParameterType_Number",
+              "numberValue": 2
+            }
+          ]
+        },
+        "selectNReq": {
+          "maxSel": 2,
+          "context": "SelectionContext_Resolution",
+          "optionContext": "OptionContext_Resolution",
+          "listType": "SelectionListType_Dynamic",
+          "ids": [
+            175,
+            176,
+            178,
+            179
+          ],
+          "prompt": {
+            "parameters": [
+              {
+                "parameterName": "Parameter",
+                "type": "ParameterType_PromptId",
+                "promptId": 2
+              }
+            ]
+          },
+          "idType": "IdType_InstanceId",
+          "unfilteredIds": [
+            174,
+            175,
+            176,
+            177,
+            178,
+            179,
+            180
+          ],
+          "sourceId": 340,
+          "validationType": "SelectionValidationType_NonRepeatable",
+          "minWeight": -2147483648,
+          "maxWeight": 2147483647
+        },
+        "allowCancel": "AllowCancel_No"
+      }
+    }
+  ]
+}

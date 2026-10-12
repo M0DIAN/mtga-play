@@ -1,0 +1,159 @@
+# MTGA 界面操作
+
+先读 computer-use 的指导文档，使用 `node_repl` 中的 `@oai/sky`。从实际返回的 app/window 对象选唯一 MTGA 窗口，不能硬编码窗口句柄。截图自动展示后直接检查，不重复解码或输出像素来观察。
+
+## 可复用记录器
+
+局势分析与效果确认优先结合 [实时日志状态](log-state.md)。日志不提供点击坐标，下面的输入后刷新与当前帧校准仍适用；已有日志证据时减少额外观察及重复看图解释。
+
+在已通过 `sky.list_apps()` 等方法取得当前 `gameWindow` 后：
+
+本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它只定义 `globalThis.createArenaController`，不发送 UI 输入；之后使用下例的 options 调用该函数。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一 helper，避免另写不一致的记录器。
+
+```js
+globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.3.5");
+globalThis.arena = await arenaModule.createArenaController(sky, {
+  window: gameWindow,
+  sessionId: "本局实际 session_id",
+  journalPath: "E:/MTGA/matches/本局目录/actions.jsonl",
+  logStatePath: "E:/MTGA/matches/本局目录/log_tracker/state.json",
+  requireExpectedRequest: true, // 局内缺少帧绑定请求时停止；导航需显式 stage: "navigation"。
+  // 仅填入本次已验证的坐标映射；不可照抄历史偏移。
+  calibration: {offsetX: 0, offsetY: 0, width: 1920, height: 1080}
+});
+await arena.observe();
+```
+
+停下来检查截图，并将相配的玩家视角请求保存为下文的 `locatingRequest`（定义见请求绑定段），再用另一调用执行一个输入：
+
+```js
+await arena.act(
+  {kind: "click", x: 1777, y: 986, coordinateSpace: "screenshot"},
+  {stage: "gameplay", expected_request: locatingRequest, turn: 6, phase: "precombat_main", chosen_action: "进入战斗", reason_summary: "已有合适攻击者。"}
+);
+```
+
+坐标只是格式示例，实际必须来自刚检查的截图。`act` 消耗当前观察、发送一次输入并立即刷新；内部不猜测游戏效果。返回的截图就是下一次决策的观察，稳定清楚时无需重复 `observe()`。
+
+检查该帧后，在下一调用中将上一输入的效果确认与一个新输入一起记录：
+
+```js
+await arena.act(
+  {kind: "click", x: 1500, y: 600, coordinateSpace: "screenshot"},
+  {stage: "gameplay", expected_request: locatingRequest, turn: 6, phase: "declare_attackers", chosen_action: "选择旧构装体", reason_summary: "可攻击且无阻挡者。"},
+  {decisionSeq: arena.lastDecisionSeq, generation: arena.generation,
+   status: "confirmed", note: "已进入攻击者选择，旧构装体有可攻击标记。"}
+);
+```
+
+第三个参数只确认上一输入，必须在看过返回帧后填写；新的输入仍是 `unverified`。`decisionSeq` 与 `generation` 必须对应正在检查的决策和帧，helper 拒绝过期或缺失引用。只有一条新输入和一次自动刷新，随后停下来检查。当前没有下一输入时，单独记录确认：
+
+```js
+await arena.confirmEffect("confirmed", "已进入选择攻击者，只有旧构装体可攻击。");
+```
+
+也可用 `failed` 或 `uncertain`。界面尚在动画时先 `await arena.observe()`；观察后再决定是否输入。外部输入或用户接管后调用 `arena.invalidate()` 并重新观察。模块不运行自动对局循环。
+
+### 请求改变时停止过期输入
+
+选择单个目标可能自动提交。第四局 seq92 的雕符目标已成功，seq96 重试前日志其实已进入攻击者选择；旧截图不能证明失败。准备重试或确认时，将**先前据以定位的请求**放入 decision 的 `expected_request: {match_key, type, msg_id}`，不要用刚变化的新请求给旧坐标背书。控制器在发送输入前再次读取 `logStatePath`；游戏、请求编号/类型、决定玩家、连续性或监听状态不符则写 `input_blocked`、清除坐标并停止，不发送输入也不额外截图。重新读简洁日志，判断原动作是否已完成，再按需要观察新控件。
+
+这个检查仅防止已检测到的请求改变，不证明画面已经重绘，也不替代日志新鲜度和合法性判断。输入前后仍存在状态竞争；不确定时按现有画面回退流程处理。未配置实时日志的操作保持原行为。第五局v0.3.2实际客户端已验证：seq15自然请求61→64、seq100主动零输入探针351→357均在发送输入前被拦截，未自动截图；第二次不是实际误点。控制器实现保留，不能把两次成功扩大为覆盖所有动画的保证。
+
+把请求快照保存在本次检查过的帧旁。读取新状态的函数只返回新状态，不暗中覆盖旧帧的请求；即使它显示另一个合法请求，也必须重新判断旧坐标是否可用。传入控制器的是此前定位时的请求，不是输入前才读到的请求：
+
+```js
+// inspectedState 必须是与刚检查帧相配的玩家视角状态。
+const locatingRequest = Object.freeze({
+  match_key: inspectedState.match_key,
+  type: inspectedState.pending_request.type,
+  msg_id: inspectedState.pending_request.msg_id
+});
+// 后续只读检查不得修改 locatingRequest；若新请求不同，先放弃旧坐标。
+// 本次语义动作的 decision 中传 expected_request: locatingRequest。
+```
+
+第五局seq23在落地后的重排帧上点错为改装间，虽然调用者已给出新请求。它说明请求检查无法发现“合法请求+错误坐标”。手牌成员变动后，若返回帧还显示原牌位，先等相关日志变化再按需要观察一次，核对牌名和原始牌位；不要沿用动画前的相邻卡牌中心。
+
+helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`，执行的 `input_ms/capture_ms/action_cycle_ms`，额外观察的 `capture_ms`。这些只测量工具层和调用间隔，不证明游戏效果。导入后的脚本会被 Node 缓存；更新 helper 后在下一局新建控制器时使用带版本的 import URL 或重置 REPL，避免仍调用旧模块。
+
+观察到对局结束后，可用 `arena.note({type:"game_result", result:"win", self_life:8, opponent_life:-10})` 写入实际结果，再更新 session.json。这里的数值是格式示例，不能照抄。
+
+## 坐标、遮挡与控件
+
+- 截图点、桌面坐标、窗口坐标必须区分。输入映射要在当前窗口模式、尺寸与 DPI 下确认。分辨率、捕获区域或后端变化后，旧校准失效。helper 会拒绝尺寸不一致的校准。
+- 首局1920×1080带标题栏截图中，成功点击使用 `input_y = screenshot_y - 31`。这是本机历史证据，不是 sky API 的普遍规则。
+- 第二局全屏截图同为1920×1080，但实际使用零偏移。-31偏移点击编辑按钮选中了下方新手牌；零偏移选择指定牌组并打开编辑页成功。同样尺寸不足以证明校准可复用，先看有无标题栏及低影响操作的实际反馈。
+- 卡牌悬浮放大会遮住其它目标；在不触发游戏动作的空白战场位置移开/点击后刷新，再定位目标。
+- 施放手牌时定位底部原牌可见区域；悬浮的大卡图不一定可施放。第五局seq54双击悬浮战线未改变状态，seq57在底部原牌位置成功。不要把预览图边界当成原牌点击区域。
+- 若截图或报错指向其他窗口，重新激活实际 MTGA 窗口并刷新。不得沿用旧坐标继续点。
+- 手中施放在首局可用双击；牺牲/选目标先单击，核对橙色框及“提交 N 项”后再单独确认。异能也可能先显示动画，下一张截图才出现费用提示。
+- 场上物件移走或新物件入场会重排布局。牺牲左侧构装体后剩余构装体移到中间，不能沿用右侧旧坐标。
+- 选择攻击者与确认攻击是两步。检查攻击数量与召唤失调，不能将“全部攻击”第一次点击当作已完成战斗。
+- 空格在首局未推进阶段。优先用当前截图中的“下一步/结束回合”按钮，并核对下一阶段文字。保留可用异能时客户端可能停留在伤害前优先权。
+
+## 占卜与拖动
+
+记录占卜牌、顶/底区域和当前分区数量。用新截图的起点终点，向 `sky.drag` 传当前 `screenshotId`，对两端使用同一坐标映射。移动后必须看见分区或数量变化再确认牌序。
+
+首局拖动均未生效。早期调用缺少 screenshotId 且映射不统一，是待实测原因；本 helper 统一传递这些参数，但隔离测试只能证明参数正确，不能声称已经修复 MTGA 占卜拖动。
+
+第二局调度置底中，零偏移且携带当前 screenshotId 的拖动仍未移动牌，点击预选后拖动也失败。放大卡面可能遮住原牌列，先恢复原始可见位置。用户明确授权改用本地连续拖动后，`mouse_event + SetCursorPos` 的约0.5秒路径仍失败；统一使用 `SendInput` 按下、32段绝对移动、松开后，调度两张及两次占卜各一张均成功。不能把结论简化成“只要慢拖就一定成功”。
+
+若两次有依据的尝试仍无变化，不重复原操作。有新证据或用户给出具体技巧时继续检验不同假设；没有可用的合法替代方法时才请求必要协助，不另开一局。接受两顶等次选时记录实际分区，不能作为原置底计划的成功示范。
+
+### 已授权连续拖动后端
+
+本机 `scripts/timed_drag.ps1` 仅适用于已核对的 `E:\MTGA\MTGA.exe`、标题 MTGA、1920×1080 客户区与64位 PowerShell。它不激活窗口；焦点丢失即停止后续移动并释放左键。先通过正常截图确认前台、提示、目标和坐标，再记录一次决策，执行一次拖动，立即刷新并人工检查分区。GUI window.id 是不透明标识，不能传作 HWND；脚本自行从唯一匹配进程取得原生句柄。
+
+本机受限终端可能看不到桌面 MTGA 进程；第四局第一次执行在查进程时退出且未发送输入，同一脚本通过受审查的桌面权限执行后成功。已获本会话后端授权时，先使用合适的执行权限，不把沙箱内“进程不存在”解释成游戏已关闭；仍保留唯一进程、路径和焦点校验。
+
+```powershell
+# 不发送输入的轨迹检查；坐标必须取自当前已检查截图。
+& '<skill>/scripts/timed_drag.ps1' -FromX 1100 -FromY 420 -ToX 580 -ToY 480 -DurationMs 500
+# 当前会话已授权此后端时，才在同一参数后加 -Execute。
+```
+
+预悬停150ms、按下后100ms、线性移动约500ms、终点停留150ms、松开；返回的 `actual_movement_ms` 只测移动段，实际整次输入更长。脚本不包含截图或日志循环，应由调用者记录 `decision` / `execution` / `effect_verification`。API成功不等于牌已移动，必须看见左底/右顶变化；能观察后续抓牌时再交叉核对。不要添加未被 sky API 支持的 duration 参数，也不要把本局许可推广到其他会话。
+
+第二局 `match_20261012_104243_11e431b7` 的 seq98–103、149–155、256–263 是成功证据；调度两张、占卜海岛和沼泽的实际移动分别约516.60、508.93、502.30、513.89ms。第4回合保留的硬光禁锢在第5回合正常抽到。第三次占卜保留两顶，直接点完成合法。实现参照 [MOUSEINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput) 与 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) 文档；该客户端证据不保证所有版本、DPI和窗口模式都可复用。
+
+检索界面单选可能自动提交，联合战线选择第二张后也可能立即进入光环附着。每次刷新后读当前提示，不机械追加“完成”；光环附着仍可能要求选一个物件后另点“提交1项”。
+
+第五局雕符离场的发现3显示本地“免费施放”选择，但过滤日志仍是通用ActionsAvailableReq。该画面需截图回退核对；supported=true只表示已解析该请求结构，不证明所有本地控件已还原。
+
+### 第六局验证后的绑定边界
+
+v0.3.3 第六局 `match_20261012_144617_fc039b92` 中，落地后重新核对牌位，第二融合仪在悬浮圣物箱旁的可见原牌区域施放（seq54）；悬浮完全遮挡时先点空白战场，再点恢复的原牌（seq92、94）。两种方法成功，未出现上局错牌与预览双击无效；这只覆盖本局实际布局。
+
+日志读取与绑定分开：`readState()` 仅返回新日志。`act()` 或 `observe()` 返回后也不要自动调用 `bind()`；先人工检查那张返回帧是否已显示相应提示/牌位，再显式冻结相配请求。输入后返回帧可能仍是旧画面，而日志已经前进，自动 `Read(); Bind()` 会再次把新请求配给旧坐标。本局调用器仍有这个隐患，靠后续检查和必要观察避免了误点；不能声称控制器已验证帧与日志同步。
+
+实时对局控制器设置 `requireExpectedRequest: true`。v0.3.4 将缺失绑定记录为 `input_blocked: missing_expected_request`，清除旧帧，不发送输入、不自动截图；纯导航显式使用 `stage: "navigation"`。第七局seq3–5用省略绑定的零输入探针验证：请求与截图代数不变、旧帧清除、无输入及自动截图；这是主动探针，不是自然误点。已有绑定改变仍由原 guard 拦截，不能拿新请求自动替换旧绑定来绕过。停止监听后不再用局内绑定操作客户端。
+
+### 只读进度等待（v0.3.5）
+
+不要在局内临时拼装同时读取、截图和绑定的循环。`waitForProgress` 只读过滤投影，不输入、不截图、不换绑；传入本次输入**之前**的状态快照。它检测gameStateId或请求类型/编号变化，默认等新的当前己方请求，也能在服务器结果出现时返回。
+
+```js
+// act前保存，不自动刷新 locatingRequest。
+const beforeInput = structuredClone(inspectedState);
+// ...一次 act，立即返回截图，先人工检查...
+// 仅当画面仍在动画且确需新坐标时：
+const progress = await arena.waitForProgress(beforeInput, {
+  timeoutMs: 8000, pollMs: 200, settleMs: 400
+});
+// progress.document是缓冲前的日志快照，不保证返回时仍新鲜。
+// changed只是观察时机依据；按需要另一次observe，检查帧，重新读日志再显式绑定。
+```
+
+超时不代表输入失败；先读日志检查自动提交和局势，再按画面诊断，不能重发旧坐标。`match_changed`或`watcher_stopped`停止局内输入。`requireSelfDecision:false`仅用于读取提交/结算进展，不授权下一输入。缓冲限0–1000ms，整个轮询限15秒，缓冲最多再加1秒；调用时可以不缓冲。缺口后的返回仍是部分投影，不使严格act重新可用。该helper经过隔离及本局日志离线复验，尚未下一局验证提速。
+
+每局重建一个会话对象管理state、locatingRequest、arena和目录，或先重置REPL。不要让新函数通过旧闭包引用上一局Read/Bind/目录；读函数只读，等待函数不顺便截图。第七局旧闭包诊断和多余observe增加了操作间隔。
+
+### 日志盲区的显式画面回退
+
+缺口后不能伪造continuous=true、取消requireExpectedRequest，或把gameplay改标navigation。严格act仍要求完整绑定。若已有用户授权完成本局，当前画面可明确核对合法输入时，可走computer-use的单步API回退，并记录`request_binding_mode:"visual_fallback"`、具体盲区、定位代数、当时match_key和请求类型/编号（缺失显式null）。这不算严格绑定成功。
+
+输入前再次只读比较上述定位快照：换局、请求类型/编号变化、帧失效则停止并重新观察；不能读取一个新请求直接替换旧快照。若连续日志和可用请求已恢复，则重新观察后回到严格act。每步仍只有一次输入，紧接一次截图，不把单目标自动提交再点成旧确认。
+
+回退也应记录输入、截图、cycle和上一截图返回至决策的单调时间；截图若通过observe记录，execution附`capture_already_counted:true`，按generation只算一次。没有记录的指标保持unknown，不在赛后估成API时长。原生拖动保留独立授权范围。

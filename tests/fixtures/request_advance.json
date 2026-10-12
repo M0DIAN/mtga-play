@@ -1,0 +1,48 @@
+{
+  "source_session": "match_20261012_131310_9a5ba67e",
+  "action_sequences": [
+    92,
+    96
+  ],
+  "before": {
+    "live": true,
+    "state": {
+      "match_key": "5a37c4151c210486",
+      "self_seat": 1,
+      "turn": {
+        "decisionPlayer": 1
+      },
+      "coverage": {
+        "continuous": true
+      },
+      "pending_request": {
+        "type": "GREMessageType_SelectTargetsReq",
+        "msg_id": 275,
+        "state_current": true
+      }
+    }
+  },
+  "after": {
+    "live": true,
+    "state": {
+      "match_key": "5a37c4151c210486",
+      "self_seat": 1,
+      "turn": {
+        "decisionPlayer": 1
+      },
+      "coverage": {
+        "continuous": true
+      },
+      "pending_request": {
+        "type": "GREMessageType_DeclareAttackersReq",
+        "msg_id": 285,
+        "state_current": true
+      }
+    }
+  },
+  "expected": {
+    "match_key": "5a37c4151c210486",
+    "type": "GREMessageType_SelectTargetsReq",
+    "msg_id": 275
+  }
+}
