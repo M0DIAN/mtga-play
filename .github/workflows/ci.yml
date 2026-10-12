@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: python -B -X utf8 -m unittest discover -s tests -p 'test_*.py' -v
+      - run: python -B -X utf8 tests/run_offline.py --suite python --output "${{ runner.temp }}/mtga-python"
 
   javascript:
     name: JavaScript controller and session
@@ -37,7 +37,7 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - run: node --test tests/test_arena_ui.mjs tests/test_state_contract.mjs tests/test_match_session.mjs
+      - run: python -B -X utf8 tests/run_offline.py --suite javascript --output "${{ runner.temp }}/mtga-javascript"
 
   windows:
     name: Windows compatibility and no-input drag
@@ -52,5 +52,4 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - run: python -B -X utf8 -m unittest discover -s tests -p 'test_*.py' -v
-      - run: node --test tests/test_arena_ui.mjs tests/test_state_contract.mjs tests/test_match_session.mjs
+      - run: python -B -X utf8 tests/run_offline.py --output "${{ runner.temp }}/mtga-windows"

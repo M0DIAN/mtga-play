@@ -4,10 +4,10 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 import subprocess
 import time
 import unittest
+from temp_support import test_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from arena_log import GameTracker, JsonFramer, LogFollower, decision_readiness, normalized_events, timestamp_utc
@@ -269,7 +269,7 @@ class ReducerTests(unittest.TestCase):
 
 class FollowerTests(unittest.TestCase):
     def test_append_partial_completion_truncate_and_rotation(self):
-        with tempfile.TemporaryDirectory(dir=os.environ.get('MTGA_TEST_TMP')) as tmp:
+        with test_directory() as tmp:
             path = Path(tmp) / 'Player.log'
             path.write_bytes(b'prefix {"a":')
             follower = LogFollower(path)
@@ -322,7 +322,7 @@ class ReadinessTests(unittest.TestCase):
 
 class CLIWatchTests(unittest.TestCase):
     def test_real_watcher_observes_append_partial_and_stops_cleanly(self):
-        with tempfile.TemporaryDirectory(dir=os.environ.get('MTGA_TEST_TMP')) as tmp:
+        with test_directory() as tmp:
             root = Path(tmp)
             log = root / 'Player.log'
             def envelope(state_id, full=False):

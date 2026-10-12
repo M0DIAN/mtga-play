@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createArenaController } from '../scripts/arena_ui.mjs';
+import { makeTestDirectory } from './temp_support.mjs';
 
 
 const WALL_NOW = Date.parse('2026-10-12T08:00:00Z');
@@ -30,10 +31,8 @@ async function requestFixture() {
   return fixture;
 }
 
-async function setup({ failInput = false, width = 1920, factory = createArenaController, logDocument, requireExpectedRequest = false, onSleep } = {}) {
-  const root = process.env.MTGA_TEST_TMP || join(process.cwd(), '.mtga-test-tmp');
-  await mkdir(root, { recursive: true });
-  const directory = await mkdtemp(join(root, 'mtga-skill-test-'));
+async function setup(t, { failInput = false, width = 1920, factory = createArenaController, logDocument, requireExpectedRequest = false, onSleep } = {}) {
+  const directory = await makeTestDirectory(t, 'mtga-skill-test-');
   const calls = [];
   const window = { id: 123, app: 'test-only' };
   let frame = 0;
@@ -55,15 +54,15 @@ async function setup({ failInput = false, width = 1920, factory = createArenaCon
   return { controller, calls, journalPath, logStatePath, advance: ms => { now += ms; } };
 }
 
-test('no input before fresh observation', async () => {
-  const { controller, calls } = await setup();
+test('no input before fresh observation', async t => {
+  const { controller, calls } = await setup(t);
   await assert.rejects(controller.act({ kind: 'key', key: 'space' }, { chosen_action: 'pass' }), /fresh observation/);
   assert.deepEqual(calls, []);
 });
 
-test('request changed after target auto-submission blocks stale retry without input or screenshot', async () => {
+test('request changed after target auto-submission blocks stale retry without input or screenshot', async t => {
   const fixture = await requestFixture();
-  const { controller, calls, journalPath, logStatePath } = await setup({ logDocument: fixture.before });
+  const { controller, calls, journalPath, logStatePath } = await setup(t, { logDocument: fixture.before });
   await controller.observe();
   await writeFile(logStatePath, JSON.stringify(fixture.after));
   await assert.rejects(controller.act({ kind: 'click', x: 900, y: 600, coordinateSpace: 'window' },
@@ -75,16 +74,16 @@ test('request changed after target auto-submission blocks stale retry without in
   assert.equal(events.some(e=>e.type==='decision'), false);
 });
 
-test('unchanged live own request permits exactly one input followed immediately by capture', async () => {
+test('unchanged live own request permits exactly one input followed immediately by capture', async t => {
   const fixture = await requestFixture();
-  const { controller, calls } = await setup({ logDocument: fixture.before });
+  const { controller, calls } = await setup(t, { logDocument: fixture.before });
   await controller.observe();
   await controller.act({ kind:'click', x:900, y:600, coordinateSpace:'window' },
     { chosen_action:'target', expected_request:fixture.expected });
   assert.deepEqual(calls.map(c=>c[0]), ['capture','click','capture']);
 });
 
-test('input gate recomputes liveness and eligibility instead of trusting persisted flags', async () => {
+test('input gate recomputes liveness and eligibility instead of trusting persisted flags', async t => {
   for (const change of [
     d => { d.checked_at = '2000-01-01T00:00:00Z'; },
     d => { d.caught_up = false; },
@@ -96,7 +95,7 @@ test('input gate recomputes liveness and eligibility instead of trusting persist
     change(fixture.before);
     fixture.before.ready_for_action = true;
     fixture.before.ready_for_decision = true;
-    const { controller, calls, journalPath } = await setup({ logDocument: fixture.before, requireExpectedRequest: true });
+    const { controller, calls, journalPath } = await setup(t, { logDocument: fixture.before, requireExpectedRequest: true });
     await controller.observe();
     await assert.rejects(controller.act({ kind: 'key', key: 'space' },
       { chosen_action: 'submit', expected_request: fixture.expected }), /request changed/);
@@ -107,21 +106,21 @@ test('input gate recomputes liveness and eligibility instead of trusting persist
   }
 });
 
-test('a healthy watcher waiting on an unchanged own request can act after an old event', async () => {
+test('a healthy watcher waiting on an unchanged own request can act after an old event', async t => {
   const fixture = await requestFixture();
   fixture.before.state.source_event_time = new Date(WALL_NOW - 60000).toISOString();
   fixture.before.ready_for_action = false;
-  const { controller, calls } = await setup({ logDocument: fixture.before, requireExpectedRequest: true });
+  const { controller, calls } = await setup(t, { logDocument: fixture.before, requireExpectedRequest: true });
   await controller.observe();
   await controller.act({ kind: 'key', key: 'space' }, { chosen_action: 'submit', expected_request: fixture.expected });
   assert.deepEqual(calls.map(c => c[0]), ['capture', 'key', 'capture']);
 });
 
-test('a bound game state or log generation cannot be silently replaced under the same request', async () => {
+test('a bound game state or log generation cannot be silently replaced under the same request', async t => {
   for (const change of [d => { d.state.game_state_id++; d.state.pending_request.game_state_id++; },
     d => { d.source.generation++; }]) {
     const fixture = await requestFixture();
-    const { controller, calls, logStatePath } = await setup({ logDocument: fixture.before });
+    const { controller, calls, logStatePath } = await setup(t, { logDocument: fixture.before });
     await controller.observe();
     const expected = { ...fixture.expected, game_state_id: 100, source_generation: 1 };
     change(fixture.before);
@@ -132,9 +131,9 @@ test('a bound game state or log generation cannot be silently replaced under the
   }
 });
 
-test('controller identity scopes screenshot generations across reconstructed controllers', async () => {
-  const first = await setup();
-  const second = await setup();
+test('controller identity scopes screenshot generations across reconstructed controllers', async t => {
+  const first = await setup(t);
+  const second = await setup(t);
   await first.controller.observe();
   await first.controller.note({ type: 'diagnostic', controller_id: 'caller-cannot-replace' });
   await second.controller.observe();
@@ -145,13 +144,13 @@ test('controller identity scopes screenshot generations across reconstructed con
   assert.ok(rows.every(row => row.controller_id === first.controller.controllerId));
 });
 
-test('wrong match, stopped watcher, partial coverage, stale request or other player all block input', async () => {
+test('wrong match, stopped watcher, partial coverage, stale request or other player all block input', async t => {
   const fixture = await requestFixture();
   for (const change of [d=>d.state.match_key='other', d=>d.live=false,
     d=>d.state.coverage.continuous=false, d=>d.state.pending_request.state_current=false,
     d=>d.state.turn.decisionPlayer=2]) {
     const document=structuredClone(fixture.before); change(document);
-    const { controller, calls } = await setup({logDocument:document});
+    const { controller, calls } = await setup(t, {logDocument:document});
     await controller.observe();
     await assert.rejects(controller.act({kind:'key',key:'space'},
       {chosen_action:'target',expected_request:fixture.expected}), /request changed/);
@@ -159,20 +158,20 @@ test('wrong match, stopped watcher, partial coverage, stale request or other pla
   }
 });
 
-test('missing or malformed log cannot silently disable an explicitly requested guard', async () => {
+test('missing or malformed log cannot silently disable an explicitly requested guard', async t => {
   const fixture = await requestFixture();
-  const plain=await setup(); await plain.controller.observe();
+  const plain=await setup(t); await plain.controller.observe();
   await assert.rejects(plain.controller.act({kind:'key',key:'space'},
     {chosen_action:'target',expected_request:fixture.expected}), /requires logStatePath/);
-  const guarded=await setup({logDocument:fixture.before}); await guarded.controller.observe();
+  const guarded=await setup(t, {logDocument:fixture.before}); await guarded.controller.observe();
   await writeFile(guarded.logStatePath,'{partial');
   await assert.rejects(guarded.controller.act({kind:'key',key:'space'},
     {chosen_action:'target',expected_request:fixture.expected}), /request changed/);
   assert.deepEqual(guarded.calls.map(c=>c[0]), ['capture']);
 });
 
-test('both drag endpoints use same calibration and current screenshot ID', async () => {
-  const { controller, calls } = await setup();
+test('both drag endpoints use same calibration and current screenshot ID', async t => {
+  const { controller, calls } = await setup(t);
   await controller.observe();
   await controller.act({ kind: 'drag', from_x: 100, from_y: 131, to_x: 400, to_y: 431, coordinateSpace: 'screenshot' }, { chosen_action: 'scry move' });
   assert.deepEqual(calls.map(c => c[0]), ['capture', 'drag', 'capture']);
@@ -181,8 +180,8 @@ test('both drag endpoints use same calibration and current screenshot ID', async
   assert.equal(calls[1][1].to_y, 400);
 });
 
-test('sent input remains unverified until screen review is recorded', async () => {
-  const { controller, journalPath } = await setup();
+test('sent input remains unverified until screen review is recorded', async t => {
+  const { controller, journalPath } = await setup(t);
   await controller.observe();
   await controller.act({ kind: 'click', x: 50, y: 100, coordinateSpace: 'window' }, { chosen_action: 'select' });
   let events = (await readFile(journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
@@ -194,8 +193,8 @@ test('sent input remains unverified until screen review is recorded', async () =
   assert.equal(events.at(-1).decision_seq, controller.lastDecisionSeq);
 });
 
-test('failed input consumes stale state and prevents blind retry', async () => {
-  const { controller, calls } = await setup({ failInput: true });
+test('failed input consumes stale state and prevents blind retry', async t => {
+  const { controller, calls } = await setup(t, { failInput: true });
   await controller.observe();
   const input = { kind: 'click', x: 50, y: 100, coordinateSpace: 'window' };
   await assert.rejects(controller.act(input, { chosen_action: 'select' }), /test input failure/);
@@ -204,30 +203,30 @@ test('failed input consumes stale state and prevents blind retry', async () => {
   assert.equal(calls.filter(c => c[0] === 'click').length, 1);
 });
 
-test('changed dimensions invalidate old calibration', async () => {
-  const { controller, calls } = await setup({ width: 1280 });
+test('changed dimensions invalidate old calibration', async t => {
+  const { controller, calls } = await setup(t, { width: 1280 });
   await controller.observe();
   await assert.rejects(controller.act({ kind: 'click', x: 50, y: 100, coordinateSpace: 'screenshot' }, { chosen_action: 'select' }), /dimensions changed/);
   assert.equal(calls.filter(c => c[0] === 'click').length, 0);
 });
 
-test('ambiguous coordinate space is refused before any input', async () => {
-  const { controller, calls } = await setup();
+test('ambiguous coordinate space is refused before any input', async t => {
+  const { controller, calls } = await setup(t);
   await controller.observe();
   await assert.rejects(controller.act({ kind: 'click', x: 50, y: 100 }, { chosen_action: 'select' }), /coordinateSpace/);
   assert.equal(calls.filter(c => c[0] === 'click').length, 0);
 });
 
-test('caller metadata cannot replace sequence or session identity', async () => {
-  const { controller, journalPath } = await setup();
+test('caller metadata cannot replace sequence or session identity', async t => {
+  const { controller, journalPath } = await setup(t);
   await controller.note({ type: 'game_result', result: 'win', seq: 999, session_id: 'other' });
   const event = JSON.parse((await readFile(journalPath, 'utf8')).trim());
   assert.equal(event.seq, 1);
   assert.equal(event.session_id, 's');
 });
 
-test('prior screen review and next action share a call with only one new input and capture', async () => {
-  const { controller, calls, journalPath } = await setup();
+test('prior screen review and next action share a call with only one new input and capture', async t => {
+  const { controller, calls, journalPath } = await setup(t);
   const input = { kind: 'click', x: 50, y: 100, coordinateSpace: 'window' };
   await controller.observe();
   await controller.act(input, { chosen_action: 'select attacker' });
@@ -246,8 +245,8 @@ test('prior screen review and next action share a call with only one new input a
   assert.equal(events.at(-1).effect_status, 'unverified');
 });
 
-test('stale or incomplete reviews cannot dispatch another input or append an event', async () => {
-  const { controller, calls, journalPath } = await setup();
+test('stale or incomplete reviews cannot dispatch another input or append an event', async t => {
+  const { controller, calls, journalPath } = await setup(t);
   const input = { kind: 'click', x: 50, y: 100, coordinateSpace: 'window' };
   await controller.observe();
   await controller.act(input, { chosen_action: 'select' });
@@ -263,8 +262,8 @@ test('stale or incomplete reviews cannot dispatch another input or append an eve
   assert.notEqual(controller.state, null);
 });
 
-test('timing separates time since the returned frame from input and screenshot calls', async () => {
-  const { controller, journalPath, advance } = await setup();
+test('timing separates time since the returned frame from input and screenshot calls', async t => {
+  const { controller, journalPath, advance } = await setup(t);
   await controller.observe();
   advance(2500);
   await controller.act({ kind: 'click', x: 50, y: 100, coordinateSpace: 'window' }, {
@@ -276,8 +275,8 @@ test('timing separates time since the returned frame from input and screenshot c
   assert.deepEqual(events[2].timing, { input_ms: 20, capture_ms: 5, action_cycle_ms: 25 });
 });
 
-test('failure timing remains uncertain and cannot become a confirmed effect without a frame', async () => {
-  const { controller, journalPath } = await setup({ failInput: true });
+test('failure timing remains uncertain and cannot become a confirmed effect without a frame', async t => {
+  const { controller, journalPath } = await setup(t, { failInput: true });
   await controller.observe();
   await assert.rejects(controller.act({ kind: 'click', x: 50, y: 100, coordinateSpace: 'window' },
     { chosen_action: 'select' }), /test input failure/);
@@ -287,16 +286,14 @@ test('failure timing remains uncertain and cannot become a confirmed effect with
   assert.deepEqual(events.at(-1).timing, { input_ms: 20, action_cycle_ms: 20 });
 });
 
-test('REPL bootstrap runs the controller and persistent session without runtime string evaluation', async () => {
+test('REPL bootstrap runs the controller and persistent session without runtime string evaluation', async t => {
   const generator = fileURLToPath(new URL('../scripts/repl_bootstrap.py', import.meta.url));
   const { stdout } = await promisify(execFile)(process.env.MTGA_PYTHON || 'python', ['-B', '-X', 'utf8', generator]);
-  const root = process.env.MTGA_TEST_TMP || join(process.cwd(), '.mtga-test-tmp');
-  await mkdir(root, { recursive: true });
-  const directory = await mkdtemp(join(root, 'mtga-bootstrap-test-'));
+  const directory = await makeTestDirectory(t, 'mtga-bootstrap-test-');
   const file = join(directory, 'bootstrap.mjs');
   await writeFile(file, stdout, 'utf8');
   await import(pathToFileURL(file).href);
-  const { controller, calls, journalPath } = await setup({ factory: globalThis.createArenaController });
+  const { controller, calls, journalPath } = await setup(t, { factory: globalThis.createArenaController });
   const input = { kind: 'click', x: 50, y: 100, coordinateSpace: 'window' };
   await assert.rejects(controller.act(input, { chosen_action: 'select' }), /fresh observation/);
   await controller.observe();
@@ -311,7 +308,7 @@ test('REPL bootstrap runs the controller and persistent session without runtime 
   assert.equal(events.at(-1).effect_status, 'unverified');
 
   const fixture = await requestFixture();
-  const strict = await setup({ factory: globalThis.createArenaController,
+  const strict = await setup(t, { factory: globalThis.createArenaController,
     logDocument: fixture.before, requireExpectedRequest: true });
   const session = await globalThis.createMatchSession(strict.controller, {
     sessionId: strict.controller.sessionId, logStatePath: strict.logStatePath,
@@ -336,9 +333,9 @@ test('REPL bootstrap runs the controller and persistent session without runtime 
   } finally { await session.close(); }
 });
 
-test('strict live controller blocks absent binding with no input/capture and clears old frame', async () => {
+test('strict live controller blocks absent binding with no input/capture and clears old frame', async t => {
   const fixture = await requestFixture();
-  const {controller,calls,journalPath}=await setup({logDocument:fixture.before,requireExpectedRequest:true});
+  const {controller,calls,journalPath}=await setup(t, {logDocument:fixture.before,requireExpectedRequest:true});
   await controller.observe();
   await assert.rejects(controller.act({kind:'key',key:'space'},
     {stage:'gameplay',chosen_action:'submit'}), /request bound/);
@@ -351,9 +348,9 @@ test('strict live controller blocks absent binding with no input/capture and cle
     {chosen_action:'retry',expected_request:fixture.expected}), /fresh observation/);
 });
 
-test('strict binding covers omitted stage; explicit navigation and bound gameplay still work', async () => {
+test('strict binding covers omitted stage; explicit navigation and bound gameplay still work', async t => {
   const fixture = await requestFixture();
-  const {controller,calls}=await setup({logDocument:fixture.before,requireExpectedRequest:true});
+  const {controller,calls}=await setup(t, {logDocument:fixture.before,requireExpectedRequest:true});
   await controller.observe();
   await assert.rejects(controller.act({kind:'key',key:'space'},{chosen_action:'unclassified'}), /request bound/);
   await controller.observe();
@@ -361,13 +358,13 @@ test('strict binding covers omitted stage; explicit navigation and bound gamepla
   await controller.act({kind:'key',key:'space'},
     {stage:'gameplay',chosen_action:'target',expected_request:fixture.expected});
   assert.deepEqual(calls.map(c=>c[0]),['capture','capture','key','capture','key','capture']);
-  await assert.rejects(setup({requireExpectedRequest:true}), /requires logStatePath/);
+  await assert.rejects(setup(t, {requireExpectedRequest:true}), /requires logStatePath/);
 });
 
-test('read-only wait sees request-only progress without capturing, binding or weakening the guard', async () => {
+test('read-only wait sees request-only progress without capturing, binding or weakening the guard', async t => {
   const fixture = await requestFixture();
   fixture.before.state.game_state_id=100; // Synthetic state number; request fixture omits it.
-  const {controller,calls,logStatePath,journalPath}=await setup({logDocument:fixture.before,requireExpectedRequest:true});
+  const {controller,calls,logStatePath,journalPath}=await setup(t, {logDocument:fixture.before,requireExpectedRequest:true});
   await controller.observe();
   const frame=controller.state, before=structuredClone(fixture.before.state);
   const next=structuredClone(fixture.before);next.state.pending_request.msg_id++;
@@ -382,11 +379,11 @@ test('read-only wait sees request-only progress without capturing, binding or we
   assert.deepEqual(calls.map(c=>c[0]),['capture']);
 });
 
-test('wait ignores unchanged own priority and null response until a new current request arrives', async () => {
+test('wait ignores unchanged own priority and null response until a new current request arrives', async t => {
   const fixture = await requestFixture();
   fixture.before.state.game_state_id=100;
   let polls=0;
-  const {controller,calls}=await setup({logDocument:fixture.before,onSleep:async(ms,path)=>{
+  const {controller,calls}=await setup(t, {logDocument:fixture.before,onSleep:async(ms,path)=>{
     polls++;
     const next=structuredClone(fixture.before);
     if(polls===1)next.state.pending_request=null;
@@ -398,10 +395,10 @@ test('wait ignores unchanged own priority and null response until a new current 
   assert.deepEqual(calls,[]);
 });
 
-test('wait is bounded on unchanged, unreadable, stopped and different-match projections', async () => {
+test('wait is bounded on unchanged, unreadable, stopped and different-match projections', async t => {
   const fixture = await requestFixture();
   fixture.before.state.game_state_id=100;
-  const {controller,calls,logStatePath}=await setup({logDocument:fixture.before});
+  const {controller,calls,logStatePath}=await setup(t, {logDocument:fixture.before});
   assert.equal((await controller.waitForProgress(fixture.before.state,{timeoutMs:400,settleMs:0})).status,'timeout');
   await writeFile(logStatePath,'{');
   const unreadable=await controller.waitForProgress(fixture.before.state,{timeoutMs:0});
@@ -417,11 +414,11 @@ test('wait is bounded on unchanged, unreadable, stopped and different-match proj
   assert.deepEqual(calls,[]);
 });
 
-test('partial log progress and completed-game evidence never restore continuous input eligibility', async () => {
+test('partial log progress and completed-game evidence never restore continuous input eligibility', async t => {
   const fixture = await requestFixture();
   fixture.before.state.game_state_id=100;
   const partial=structuredClone(fixture.before);partial.state.coverage.continuous=false;
-  const {controller,calls,logStatePath}=await setup({logDocument:partial,requireExpectedRequest:true});
+  const {controller,calls,logStatePath}=await setup(t, {logDocument:partial,requireExpectedRequest:true});
   await controller.observe();
   const before=structuredClone(partial.state);
   partial.state.game_state_id++;
