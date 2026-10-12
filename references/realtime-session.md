@@ -1,4 +1,4 @@
-# 实时会话协调器（v0.4）
+# 实时会话协调器（v0.4.5）
 
 `scripts/match_session.mjs` 把单局的状态版本、等待、思考预算、帧绑定和当前行动步骤保存在一个 REPL 对象中。它复用只读监听与 `arena_ui.mjs`，没有后台模型调用或自动视觉定位。每次实际输入仍由当前受支持的电脑操作后端执行，并立即返回一张新观察供 Codex 检查。
 
@@ -9,7 +9,7 @@
 ```js
 var { runReplPreflight } = await import('file:///E:/MTGA/development/mtga-play/scripts/repl_preflight.mjs');
 globalThis.replPreflight = await runReplPreflight({
-  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.4/current-run'
+  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.5/current-run'
 });
 console.log(JSON.stringify(replPreflight));
 ```
@@ -27,6 +27,7 @@ globalThis.matchSession = await createMatchSession(arena, {
   sessionId: arena.sessionId,
   logStatePath: arena.logStatePath,
   pollMs: 200,
+  presentation: 'compact',
   decisionTimeoutMs: 30000
 });
 ```
@@ -44,6 +45,19 @@ globalThis.decisionPacket = await matchSession.next({ timeoutMs: 8000 });
 ```
 
 只有 `status === "needs_decision"` 才是新的模型决策包。包内 `state` 包含本方手牌、公开区域、动态异能、当前请求及可用选择，`evidence` 保留这次读取的事件序号。心跳、日志字节偏移和对象观察计数不改变 token；请求、当前场面、候选、动态异能或日志源世代变化会产生新 token。游戏状态 ID 的变化也按需重新判断，采用保守口径。
+
+快速流程选 `presentation: 'compact'`；兼容默认是 `'full'`。compact 在区域、可用动作与请求中以 `{card_ref: 'c1'}` 引用同包的 `state.card_catalog.c1`，相同公开牌张只呈现一次；不同当前属性仍有不同记录。规则文字以 `{detail_path, chars}` 显式标明；所有候选、未过滤但合法可见的请求牌张、费用、目标和选择数组均保留，不做数量截断。完整玩家投影私下参与指纹与严格就绪判断，呈现模式不会改变安全身份，不包含对手隐藏信息或 raw GRE。
+
+必要时读取准确规则或某个子树，路径取自当前包（也可显式选择 `['pending_request']`）。返回的是 JSON 的字符片段，须拼接到 `next_offset === null` 才解析：
+
+```js
+var path = decisionPacket.state.card_catalog[selectedCardRef].rules_en.detail_path;
+var detail = await matchSession.details(decisionPacket.token, { path, offset: 0, limit: 8192 });
+// detail.json / total_chars / next_offset；每次最多 32768 字符。
+// 如 next_offset 非 null，用相同 path/token 和该 offset 继续，不能忽略未读部分。
+```
+
+`details` 重读当前状态并检查 token 与预算，旧请求、隐藏区域和不存在的路径均不能读取；不截图、不刷新 token，不返回内部回放数据。
 
 `next` 默认最多等待 8 秒，允许 0～15 秒；没有新决策时只读状态文件，不截图、不输入、不反复调用模型。它不会在工具返回后自行唤醒 Codex。要继续等待，需要当前工作流再次调用 `next`。
 
@@ -72,7 +86,7 @@ await matchSession.bind(decisionPacket.token, {
 
 `intent` 只接受 `id/goal/step/expected_result/object_ids`。保存当前步骤与结果，不接受后续坐标或点击列表。`bind` 的 `ready_for_input: true` 表示当前帧与意图已经明确绑定；它本身不输入。
 
-若截图前后的语义状态发生变化，这张图不能绑定到新 token。先获取新决策，再观察一次，核对实际画面。收到新日志并不证明此前截图已经显示该状态。
+若截图两侧的语义状态发生变化，这张图不能绑定到新 token。先获取新决策，再观察一次，核对实际画面。收到新日志并不证明此前截图已经显示该状态。可选的只读局部裁剪见 [界面操作](ui-play.md#当前帧的只读裁剪v045)，它保留完整帧且不建立候选或绑定。
 
 ### 3. 输入一次，随后核对效果
 
@@ -106,9 +120,23 @@ await matchSession.confirm({
 
 完成当前步骤后，只有模型重新检查下一帧并显式 `bind`，才能再输入。若请求与状态没变，且 `candidate_token` 仍等于当前 token，可以直接检查并使用输入后返回的帧，省掉额外截图。
 
-如果日志在输入过程中前进，返回帧仍可用于核对上一动作的效果，但不会自动绑定新请求。`next()` 获取新 token 后，需要 `observe(newToken)` 取得稳定候选。模型确认原目标仍适用时，可以在新意图描述中传入上一已确认的 `matchSession.intent.id`，更新 `step/expected_result/object_ids`；旧意图已取消或效果未知时不允许沿用该 ID。
+输入把状态 A 改成 B 时，控制器在输入完成及可选窗口恢复后，严格执行只读状态 S1→`get_window_state`→只读状态 S2。仅当两侧都通过严格检查、完整指纹相同，且随后读取仍为 B，才能为该确切帧保留 B 的候选 token。候选在接受证据时创建并开始预算，确认或 `next` 不会延长期限。日志稳定仍不证明动画结束，模型须检查返回全图中的新请求、控件和布局。
 
-每份决策默认有 30 秒预算，可配置 1～120 秒。预算是从决策包生成到输入检查的总时间，包含思考与观察。过期结果无法输入；再次 `next` 会为当前状态发新 token。它不测量或中止后台模型推理，也不保证端到端延迟达到该预算。状态读取完成到实际输入之间仍有竞争窗口，当前实现不宣称完全消除。
+已检查 `actionResult.frame` 后，可合并效果记账与下一包读取：
+
+```js
+var reviewed = await matchSession.confirm({
+  decisionSeq: actionResult.decisionSeq, generation: actionResult.generation,
+  status: 'confirmed', note: '已检查返回完整画面，当前步骤效果与新请求可见。', next: true
+});
+var nextPacket = reviewed.next;
+```
+
+此调用仅记账与读状态，不截图、不输入、不自动绑定。`nextPacket.status === 'needs_decision'` 且 `frame_reuse` 指向已检查帧时，可用该包 token 和原 generation 显式 `bind`；相同 token 已发布过时返回 `waiting/no_new_decision`，可在预算内继续对已检查的候选显式绑定。若 `frame_reuse === null` 或 `candidate_token === null`，则获取有效包后 `observe(newToken)`，不可重新关联旧帧。截图期间或之后状态变化、预算到期、取消、外部刷新或控制器已消费帧，均拒绝复用；旧 token 过期后产生的新 token 不能延续旧帧预算。
+
+即使双侧采样失败或不同，返回图仍可支持模型核验上一动作；这与下一输入资格分别保存，不将已经发送的输入改标成未发送。采样证据是只读的 `arena.refreshEvidence`，包含控制器、generation、截图 IDs 和两侧指纹/就绪判断。日志增加 `session_frame`、`session_frame_use` 和 `session_blocked`，记录输入刷新复用、额外观察及 token/预算拦截。模型确认原目标仍适用时，可以在新意图描述中传入上一已确认的 `matchSession.intent.id`，更新 `step/expected_result/object_ids`；旧意图已取消或效果未知时不允许沿用该 ID。返回新图的同一工具调用内不得确认该图。
+
+每份决策默认有 30 秒预算，可配置 1～120 秒。预算从 token 创建起算，包含思考、观察与待确认时间；包内 `decision_budget_ms` 是返回时剩余预算。过期结果无法输入；再次 `next` 会为当前状态发新 token，但需重新观察。它不测量或中止后台模型推理，也不保证端到端延迟达到该预算。状态读取完成到实际输入之间仍有竞争窗口，当前实现不宣称完全消除。
 
 ## 返回状态与停止
 
@@ -131,4 +159,4 @@ await matchSession.close("本局结束");
 
 ## 当前验证范围
 
-`node --test tests/test_match_session.mjs tests/test_repl_preflight.mjs` 使用临时玩家投影文件、真实 `arena_ui` 控制器与模拟电脑后端，验证等待、状态变化、预算、绑定、自动提交、效果确认及取消。另在没有 `process` 全局且拒绝 `node:process` 导入的沙箱中运行精确 ESM 与生成 bootstrap，覆盖 Windows 盘符/UNC 的大小写、分隔符和点路径别名以及 POSIX 大小写区别。测试不启动 MTGA、不调用模型 API、不发送真实电脑输入。自动定位、整局策略和真实客户端响应时间仍需要后续接入验证。
+`node --test tests/test_match_session.mjs tests/test_arena_ui.mjs tests/test_frame_crop.mjs tests/test_repl_preflight.mjs` 使用临时玩家投影文件、真实控制器与模拟电脑后端，覆盖紧凑呈现、双侧采样、预算、绑定、确认及拒绝复用。有效 PNG 字节验证不同裁剪区域与来源失效。无 `process/Buffer` 全局的 ESM/bootstrap 沙箱保留身份与清理回归，新增 `node:zlib` 内置模块的只读 PNG 路径；预检仍零电脑后端调用，不验证真实截图或真实客户端。测试不启动 MTGA、不调用模型 API、不发送真实电脑输入。自动定位、整局策略和真实客户端响应时间仍需要后续接入验证。

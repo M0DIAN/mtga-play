@@ -50,6 +50,32 @@ function decisionView(document) {
   return withoutObservationCounters(view);
 }
 
+// Presentation only: every choice/cost/target remains in place. Exact duplicate
+// visible cards share one entry; long rules are explicitly available on demand.
+function compactView(view) {
+  const cards = {}, known = new Map();
+  const ruleKeys = new Set(['rules', 'rules_en', 'rules_zh', 'display_rules_en', 'display_rules_zh', 'text_en', 'text_zh']);
+  function walk(value, path, inCard = false) {
+    if (Array.isArray(value)) return value.map((item, index) => walk(item, [...path, index], inCard));
+    if (!value || typeof value !== 'object') return value;
+    if (Object.hasOwn(value, 'instance_id') && !inCard) {
+      const signature = stableJSON(value);
+      let ref = known.get(signature);
+      if (!ref) {
+        ref = 'c' + (known.size + 1);
+        known.set(signature, ref);
+        cards[ref] = { ...walk(value, path, true), detail_path: path };
+      }
+      return { card_ref: ref };
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+      inCard && ruleKeys.has(key) && typeof item === 'string'
+        ? { detail_path: [...path, key], chars: item.length }
+        : walk(item, [...path, key], inCard)]));
+  }
+  return { ...walk(view, []), card_catalog: cards };
+}
+
 function semanticIntent(value, previous, id) {
   const allowed = new Set(['id', 'goal', 'step', 'expected_result', 'object_ids']);
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -74,7 +100,8 @@ function semanticIntent(value, previous, id) {
 export async function createMatchSession(arena, options) {
   const { sessionId, logStatePath, pollMs = 200, maxAgeMs = 5000,
     decisionTimeoutMs = 30000, wallNow = () => Date.now(),
-    monotonicNow = () => performance.now(), sleep = delay } = options ?? {};
+    monotonicNow = () => performance.now(), sleep = delay, presentation = 'full' } = options ?? {};
+  if (!['full', 'compact'].includes(presentation)) throw new Error('presentation must be full or compact');
   if (typeof sessionId !== 'string' || !sessionId.trim() || typeof logStatePath !== 'string' || !logStatePath.trim()) {
     throw new Error('Actual sessionId and player-projection logStatePath required');
   }
@@ -188,24 +215,84 @@ export async function createMatchSession(arena, options) {
     const problem = obstruction(state);
     if (problem) return problem;
     if (!state.readiness.ready_for_action) return blocked('not_our_supported_request', { reasons: state.readiness.action_blockers });
-    if (!decision || token !== decision.token || state.fingerprint !== decision.fingerprint) return blocked(lastInvalidation ?? 'decision_changed');
+    if (!decision || token !== decision.token || state.fingerprint !== decision.fingerprint) {
+      const reason = lastInvalidation ?? 'decision_changed';
+      queue({ type: 'session_blocked', reason, token });
+      return blocked(reason);
+    }
     if (monotonicNow() > decision.expiresAt) {
+      queue({ type: 'session_blocked', reason: 'decision_expired', token });
       invalidate('decision_expired');
       return blocked('decision_expired');
     }
     return null;
   }
 
-  function packet(state) {
-    const token = `${sessionId}:${owner.id}:${++serial}:${state.fingerprint}`;
-    decision = { token, fingerprint: state.fingerprint, expiresAt: monotonicNow() + decisionTimeoutMs };
+  function packet(state, publish = true) {
+    if (!decision) {
+      const token = `${sessionId}:${owner.id}:${++serial}:${state.fingerprint}`;
+      decision = { token, fingerprint: state.fingerprint, expiresAt: monotonicNow() + decisionTimeoutMs, published: false };
+      queue({ type: 'session_decision', token, game_state_id: state.view.game_state_id,
+        source_generation: state.view.source_generation, decision_budget_ms: decisionTimeoutMs });
+    }
+    const token = decision.token;
+    if (publish) decision.published = true;
     lastInvalidation = null;
-    queue({ type: 'session_decision', token, game_state_id: state.view.game_state_id,
-      source_generation: state.view.source_generation, decision_budget_ms: decisionTimeoutMs });
-    return { status: 'needs_decision', token, decision_budget_ms: decisionTimeoutMs,
-      state: copy(state.view), previous_intent: copy(intent),
+    if (!publish) return null; // Reserve deadline now; project only after effect review.
+    return { status: 'needs_decision', token, presentation,
+      decision_budget_ms: Math.max(0, decision.expiresAt - monotonicNow()),
+      state: presentation === 'compact' ? compactView(state.view) : copy(state.view), previous_intent: copy(intent),
+      frame_reuse: usableCandidate(token) ? { controllerId: arena.controllerId,
+        generation: candidate.generation, screenshotIds: [...candidate.screenshotIds], source: candidate.source } : null,
       evidence: { event_seq: state.document.event_seq ?? null, game_state_id: state.view.game_state_id,
         source_generation: state.view.source_generation } };
+  }
+
+  function usableCandidate(token) {
+    return candidate && candidate.token === token && candidate.epoch === epoch &&
+      decision?.token === token && monotonicNow() <= decision.expiresAt &&
+      candidate.frame === arena.state && arena.state && candidate.generation === arena.generation;
+  }
+
+  async function sampleState() {
+    const state = await current();
+    return { fingerprint: state.fingerprint ?? null,
+      actionable: !obstruction(state) && state.readiness.ready_for_action === true };
+  }
+
+  function acceptFrame(frame, state, source, startEpoch, allowNewDecision = false) {
+    const evidence = arena.refreshEvidence;
+    const screenshotIds = (frame?.screenshots ?? []).map(shot => shot.id);
+    const imagePresent = screenshotIds.length > 0 && screenshotIds.every(id => typeof id === 'string' && id.length > 0);
+    const stable = imagePresent && frame === arena.state && !obstruction(state) && state.readiness.ready_for_action && epoch === startEpoch && !closed &&
+      evidence?.controllerId === arena.controllerId && evidence.generation === arena.generation &&
+      stableJSON(evidence.screenshotIds) === stableJSON(screenshotIds) &&
+      evidence.before?.actionable === true && evidence.after?.actionable === true &&
+      evidence.before.fingerprint === evidence.after.fingerprint && evidence.after.fingerprint === state.fingerprint;
+    // Effect review eligibility is deliberately independent of next-input eligibility.
+    candidate = imagePresent && frame === arena.state ? { frame, generation: arena.generation,
+      epoch: startEpoch, source, screenshotIds: evidence?.screenshotIds ?? [], token: null } : null;
+    if (decision && monotonicNow() > decision.expiresAt) invalidate('decision_expired');
+    if (stable && allowNewDecision && !decision && lastInvalidation !== 'decision_expired') packet(state, false);
+    if (stable && decision?.fingerprint === state.fingerprint) candidate.token = decision.token;
+    queue({ type: 'session_frame', source, generation: arena.generation,
+      reusable: candidate?.token != null, reason: stable ? (candidate?.token ? 'stable_capture' : 'no_valid_token') : 'capture_state_unproven' });
+    return stable;
+  }
+
+  function immediateNext(state) {
+    const problem = obstruction(state);
+    if (problem) return problem;
+    if (pending) return { status: 'needs_observation', reason: 'effect_unconfirmed',
+      decisionSeq: pending.decisionSeq, generation: arena.generation, intent: copy(intent) };
+    if (state.readiness.ready_for_action) {
+      if (decision && monotonicNow() > decision.expiresAt) {
+        queue({ type: 'session_blocked', reason: 'decision_expired', token: decision.token });
+        invalidate('decision_expired');
+      }
+      if (!decision || !decision.published) return packet(state);
+    }
+    return null;
   }
 
   function interruption(reason, closing = false) {
@@ -245,19 +332,34 @@ export async function createMatchSession(arena, options) {
           if (closed || epoch !== startEpoch) return blocked(closed ? 'session_closed' : 'cancelled');
           const state = await current();
           if (closed || epoch !== startEpoch) return blocked(closed ? 'session_closed' : 'cancelled');
-          const problem = obstruction(state);
-          if (problem) return problem;
-          if (pending) return { status: 'needs_observation', reason: 'effect_unconfirmed',
-            decisionSeq: pending.decisionSeq, generation: arena.generation, intent: copy(intent) };
-          if (state.readiness.ready_for_action) {
-            if (decision && monotonicNow() > decision.expiresAt) invalidate('decision_expired');
-            if (!decision) return packet(state);
-          }
+          const result = immediateNext(state);
+          if (result) return result;
           const remaining = timeoutMs - elapsed(start);
           if (remaining <= 0) return { status: 'waiting', reason: state.readiness.ready_for_action ? 'no_new_decision' : 'not_our_request',
             token: decision?.token ?? null, waited_ms: elapsed(start), reasons: state.readiness.action_blockers };
           await sleep(Math.min(pollMs, remaining));
         }
+      });
+    },
+
+    async details(token, { path, offset = 0, limit = 8192 } = {}) {
+      if (!Array.isArray(path) || path.length < 1 || path.length > 16 ||
+          !path.every(key => typeof key === 'string' || Number.isInteger(key)) ||
+          !Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 32768) {
+        throw new Error('Explicit detail path and bounded character slice required');
+      }
+      return exclusive(async () => {
+        const state = await current();
+        const problem = checkDecision(state, token);
+        if (problem) return problem;
+        let value = state.view;
+        for (const key of path) {
+          if (!value || typeof value !== 'object' || !Object.hasOwn(value, key)) throw new Error('Detail path absent from player-visible state');
+          value = value[key];
+        }
+        const json = JSON.stringify(value);
+        return { status: 'detail', token, path: [...path], offset, total_chars: json.length,
+          json: json.slice(offset, offset + limit), next_offset: offset + limit < json.length ? offset + limit : null };
       });
     },
 
@@ -270,13 +372,12 @@ export async function createMatchSession(arena, options) {
         }
         binding = null;
         candidate = null;
-        const frame = await arena.observe();
+        const startEpoch = epoch;
+        const frame = await arena.observe({ sampleState });
         const after = await current();
-        const stable = !before.error && !after.error && before.fingerprint === after.fingerprint;
-        candidate = { generation: arena.generation,
-          token: stable && decision?.fingerprint === after.fingerprint ? decision.token : null };
+        const stable = acceptFrame(frame, after, 'extra_observation', startEpoch);
         return { status: 'needs_observation', reason: stable ? 'inspect_frame' : 'state_changed_during_capture',
-          frame, generation: arena.generation, candidate_token: candidate.token, frame_bound: false };
+          frame, generation: arena.generation, candidate_token: candidate?.token ?? null, frame_bound: false };
       });
     },
 
@@ -287,7 +388,7 @@ export async function createMatchSession(arena, options) {
         const problem = checkDecision(state, token);
         if (problem) return problem;
         if (pending) return blocked('effect_unconfirmed');
-        if (!arena.state || !candidate || generation !== arena.generation || generation !== candidate.generation || candidate.token !== token) {
+        if (!usableCandidate(token) || generation !== candidate.generation) {
           binding = null;
           return { status: 'needs_observation', reason: 'frame_not_for_decision', frame_bound: false };
         }
@@ -301,6 +402,8 @@ export async function createMatchSession(arena, options) {
           type: state.view.pending_request.type, msg_id: state.view.pending_request.msg_id,
           game_state_id: state.view.game_state_id, source_generation: state.view.source_generation } };
         queue({ type: 'intent_bound', token, generation, observation: note, intent: copy(intent) });
+        queue({ type: 'session_frame_use', token, generation, source: candidate.source,
+          reused_input_refresh: candidate.source === 'input_refresh' });
         return { status: 'waiting', reason: 'awaiting_input', ready_for_input: true, token, generation, intent: copy(intent) };
       });
     },
@@ -323,7 +426,7 @@ export async function createMatchSession(arena, options) {
           frame = await arena.act(input, { stage: 'gameplay', chosen_action: intent.goal,
             turn: Number.isInteger(before.view.own_turn) && before.view.own_turn >= 0 ? before.view.own_turn : null,
             phase: before.view.turn?.phase ?? null,
-            semantic_intent: copy(intent), session_token: token, expected_request: bound.expected });
+            semantic_intent: copy(intent), session_token: token, expected_request: bound.expected }, undefined, { sampleState });
         } catch (error) { executionError = String(error); }
         if (arena.lastDecisionSeq === priorDecision) {
           intent.status = 'cancelled';
@@ -333,8 +436,7 @@ export async function createMatchSession(arena, options) {
         }
         pending = { decisionSeq: arena.lastDecisionSeq, matchKey: before.view.match_key };
         const after = await current();
-        if (frame && !after.error) candidate = { generation: arena.generation,
-          token: before.fingerprint === after.fingerprint && decision?.token === token ? token : null };
+        acceptFrame(frame, after, 'input_refresh', startEpoch, true);
         if (closed || epoch !== startEpoch) {
           intent.status = 'cancelled';
           intent.last_result = { status: 'uncertain', note: 'Cancelled while input was in flight; no automatic retry' };
@@ -347,7 +449,8 @@ export async function createMatchSession(arena, options) {
       });
     },
 
-    async confirm({ decisionSeq, generation, status, note } = {}) {
+    async confirm({ decisionSeq, generation, status, note, next = false } = {}) {
+      if (typeof next !== 'boolean') throw new Error('next must be boolean');
       if (!['confirmed', 'failed', 'uncertain'].includes(status) || typeof note !== 'string' || !note.trim()) throw new Error('Observed effect status and note required');
       return exclusive(async () => {
         if (!pending || pending.decisionSeq !== decisionSeq || arena.lastDecisionSeq !== decisionSeq ||
@@ -364,7 +467,13 @@ export async function createMatchSession(arena, options) {
         queue({ type: 'intent_result', intent: copy(intent) });
         pending = null;
         if (status !== 'confirmed') invalidate('effect_' + status);
-        return { status: 'waiting', reason: 'effect_recorded', intent: copy(intent) };
+        const result = { status: 'waiting', reason: 'effect_recorded', intent: copy(intent) };
+        if (next) {
+          const latest = await current();
+          if (closed || epoch !== startEpoch) return blocked(closed ? 'session_closed' : 'cancelled');
+          result.next = immediateNext(latest) ?? { status: 'waiting', reason: 'no_new_decision', token: decision?.token ?? null };
+        }
+        return result;
       });
     },
 

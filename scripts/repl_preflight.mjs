@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { createArenaController } from './arena_ui.mjs';
 import { createMatchSession } from './match_session.mjs';
+import { cropPNG, cropCurrentFrame } from './frame_crop.mjs';
 
 export async function runReplPreflight({ tempRoot } = {}) {
   const report = { schema_version: 1, status: 'failed', scope: 'synthetic_no_input',
@@ -46,7 +47,7 @@ export async function runReplPreflight({ tempRoot } = {}) {
       window: { app: 'synthetic-preflight-only', id: 1 }, journalPath, logStatePath,
       requireExpectedRequest: true, wallNow: () => now });
     check('strict_controller_created', arena.requiresExpectedRequest === true && arena.sessionId === sessionId);
-    const config = { sessionId, logStatePath, wallNow: () => now };
+    const config = { sessionId, logStatePath, wallNow: () => now, presentation: 'compact' };
     const create = async (controller = arena, options = config) => {
       const session = await createMatchSession(controller, options);
       sessions.push(session);
@@ -66,6 +67,29 @@ export async function runReplPreflight({ tempRoot } = {}) {
       () => create({ ...arena, sessionId: otherId }, { ...config, sessionId: otherId }), /active REPL owner/));
     const packet = await session.next({ timeoutMs: 0 });
     check('next_decision', packet.status === 'needs_decision' && typeof packet.token === 'string');
+    check('compact_packet', packet.presentation === 'compact' && !!packet.state.card_catalog);
+    const detail = await session.details(packet.token, { path: ['pending_request'], limit: 64 });
+    check('bounded_detail', detail.status === 'detail' && detail.json.length <= 64 && detail.next_offset === 64);
+    check('no_automatic_frame_binding', (await session.bind(packet.token,
+      { generation: 0, note: 'synthetic preflight has no observed image' })).reason === 'frame_not_for_decision');
+    check('confirm_next_requires_effect_review', (await session.confirm({ decisionSeq: 1, generation: 0,
+      status: 'confirmed', note: 'synthetic preflight has no observed effect', next: true })).reason === 'effect_review_mismatch');
+    check('refresh_evidence_surface', arena.refreshEvidence === null);
+    // Pure read aid with real, valid Screenshot.url bytes. This is not a real
+    // controller observation and never bypasses readiness or grants input.
+    const url = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAF0lEQVR4nGP4z8DwHwwZ/v//D2MhCwAAIBAR7/vVKbUAAAAASUVORK5CYII=';
+    const source = { controllerId: 'synthetic-crop', generation: 1,
+      state: { screenshots: [{ id: 'png', url, width: 2, height: 1, originX: 10, originY: 20 }] } };
+    const cropRequest = { controllerId: source.controllerId, generation: 1, screenshotId: 'png',
+      coordinateSpace: 'screenshot', rect: { x: 0, y: 0, width: 0.5, height: 1 } };
+    const crop = await cropCurrentFrame(source, cropRequest);
+    const other = await cropCurrentFrame(source, { ...cropRequest, rect: { ...cropRequest.rect, x: 0.5 } });
+    check('current_png_crop', crop.image.width === 1 && crop.image.height === 2 &&
+      crop.image.url !== other.image.url && crop.mapping.scaleX === 2 && crop.full_frame === source.state);
+    check('crop_stale_guard', await rejected(() => cropCurrentFrame(source, { ...cropRequest, generation: 2 }), /current controller/));
+    check('crop_bounds_guard', await rejected(() => cropCurrentFrame(source,
+      { ...cropRequest, rect: { ...cropRequest.rect, x: 2 } }), /bounds/));
+    check('png_renderer_export', typeof cropPNG === 'function');
     check('cancel_invalidates_token', (await session.cancel('synthetic preflight')).reason === 'cancelled'
       && session.token === null);
     const renewed = await session.next({ timeoutMs: 0 });

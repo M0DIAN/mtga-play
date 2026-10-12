@@ -59,7 +59,7 @@ async function setup(t, options = {}) {
     async get_window_state() {
       calls.push('capture'); frame++; context.advance(5);
       if (options.onCapture) await options.onCapture(context, frame);
-      return { window, screenshots: [{ id: 'frame-' + frame, width: 1280, height: 720 }] };
+      return { window, screenshots: options.emptyCaptureAt === frame ? [] : [{ id: 'frame-' + frame, width: 1280, height: 720 }] };
     },
     async click() { calls.push('click'); context.advance(20); if (options.onInput) await options.onInput(context); },
     async drag() { calls.push('drag'); },
@@ -68,6 +68,7 @@ async function setup(t, options = {}) {
   const arena = await createArenaController(sky, { sessionId, window, journalPath: join(directory, 'actions.jsonl'),
     logStatePath, requireExpectedRequest: true, wallNow: () => now, monotonicNow: () => mono });
   const config = { sessionId, logStatePath, decisionTimeoutMs: options.decisionTimeoutMs ?? 30000,
+    presentation: options.presentation ?? 'full',
     wallNow: () => now, monotonicNow: () => mono,
     sleep: async ms => { context.advance(ms); await context.change(); if (options.onSleep) await options.onSleep(context); } };
   session = await createMatchSession(arena, config);
@@ -278,7 +279,7 @@ test('one bound intent produces one input and capture; continuation requires exp
   assert.equal(journal.filter(row => row.type === 'intent_result').length, 1);
 });
 
-test('new post-input state may confirm an effect but cannot silently reuse that frame for a new token', async t => {
+test('input changes A to B; exact capture bracketed by stable B permits explicit reuse after confirmation', async t => {
   const h = await setup(t, { onInput: async h => h.change(d => {
     d.state.game_state_id++;
     d.state.pending_request.game_state_id++;
@@ -286,17 +287,19 @@ test('new post-input state may confirm an effect but cannot silently reuse that 
   }) });
   const packet = await ready(h);
   const acted = await h.session.act(packet.token, input);
-  assert.equal(acted.candidate_token, null);
-  await h.session.confirm({ ...acted, status: 'confirmed', note: 'The new target prompt is visible.' });
-  const next = await h.session.next({ timeoutMs: 0 });
+  assert.ok(acted.candidate_token);
+  assert.equal((await h.session.next({ timeoutMs: 0 })).reason, 'effect_unconfirmed');
+  const confirmed = await h.session.confirm({ ...acted, status: 'confirmed', note: 'The new target prompt is visible.', next: true });
+  const next = confirmed.next;
   assert.notEqual(next.token, packet.token);
+  assert.equal(next.token, acted.candidate_token);
+  assert.equal(next.frame_reuse.source, 'input_refresh');
   const nextIntent = { ...intention, id: h.session.intent.id, step: 'choose_target' };
   assert.equal((await h.session.bind(next.token, { generation: acted.generation,
-    note: 'Reusing an ambiguous frame', intent: nextIntent })).reason, 'frame_not_for_decision');
-  const fresh = await h.session.observe(next.token);
-  assert.equal((await h.session.bind(next.token, { generation: fresh.generation,
-    note: 'Fresh frame shows the new target request', intent: nextIntent })).ready_for_input, true);
-  assert.deepEqual(h.calls, ['capture', 'click', 'capture', 'capture']);
+    note: 'Returned full frame shows the stable new target request', intent: nextIntent })).ready_for_input, true);
+  assert.equal((await h.session.next({ timeoutMs: 0 })).reason, 'no_new_decision');
+  assert.deepEqual(h.calls, ['capture', 'click', 'capture']);
+  assert.equal((await h.journal()).filter(row => row.type === 'session_frame_use' && row.reused_input_refresh).length, 1);
 });
 
 test('explicit cancel and close retire a confirmed intent without changing its observed step result', async t => {
@@ -425,4 +428,160 @@ test('unsupported requests call for observation without enabling a gameplay bypa
   assert.equal(h.session.token, null);
   assert.ok(result.reasons.includes('request_semantics_unsupported'));
   assert.deepEqual(h.calls, []);
+});
+
+test('compact presentation deduplicates visible cards while exact fingerprints and every choice remain intact', async t => {
+  const initial = d => {
+    const card = d.state.zones[0].cards[0];
+    Object.assign(card, { rules_en: 'Exact card rule. '.repeat(100), ability_ids: [77],
+      abilities: [{ text_en: 'Pay a cost', cost: { sacrifice: [101, 202] }, targets: [202] }] });
+    d.state.available_actions[0].card = structuredClone(card);
+    Object.assign(d.state.pending_request, { cards: [structuredClone(card)],
+      unfiltered_cards: [{ instance_id: 303, name: 'Legally viewed library card' }],
+      minSel: 1, maxSel: 2, groupSpecs: [{ ids: [101, 303] }], cost_selection: { weights: [1, 2], ids: [101, 303] } });
+    d.state.zones[2].cards = [{ instance_id: 404, name: 'hidden library secret', rules_en: 'secret' }];
+    d.state.zones[3].cards = [{ instance_id: 405, name: 'hidden opponent secret' }];
+  };
+  const full = await setup(t, { initial });
+  const compact = await setup(t, { initial, presentation: 'compact' });
+  const a = await full.session.next({ timeoutMs: 0 }), b = await compact.session.next({ timeoutMs: 0 });
+  assert.equal(a.token.split(':').at(-1), b.token.split(':').at(-1));
+  assert.equal(JSON.stringify(b).includes('secret'), false);
+  assert.ok(JSON.stringify(b.state).length < JSON.stringify(a.state).length / 2);
+  const ref = b.state.zones[0].cards[0].card_ref;
+  assert.equal(b.state.available_actions[0].card.card_ref, ref);
+  assert.equal(b.state.pending_request.cards[0].card_ref, ref);
+  assert.deepEqual(b.state.pending_request.groupSpecs, a.state.pending_request.groupSpecs);
+  assert.deepEqual(b.state.pending_request.cost_selection, a.state.pending_request.cost_selection);
+  assert.equal(b.state.card_catalog[b.state.pending_request.unfiltered_cards[0].card_ref].name, 'Legally viewed library card');
+  const path = b.state.card_catalog[ref].rules_en.detail_path;
+  let json = '', offset = 0;
+  do {
+    const detail = await compact.session.details(b.token, { path, offset, limit: 97 });
+    assert.ok(detail.json.length <= 97);
+    json += detail.json; offset = detail.next_offset;
+  } while (offset !== null);
+  assert.equal(JSON.parse(json), a.state.zones[0].cards[0].rules_en);
+  const exact = await compact.session.details(b.token, { path: b.state.card_catalog[ref].detail_path });
+  assert.deepEqual(JSON.parse(exact.json), a.state.zones[0].cards[0]);
+  await assert.rejects(compact.session.details(b.token, { path: ['zones', 2, 'cards'] }), /absent/);
+  await assert.rejects(compact.session.details(b.token, { path: ['__proto__'] }), /absent/);
+  await assert.rejects(compact.session.details(b.token, { path, limit: 32769 }), /bounded/);
+  assert.deepEqual(compact.calls, []);
+});
+
+test('compact rules, ability cost, target and choice mutations invalidate the complete safety identity', async t => {
+  for (const mutate of [
+    d => { d.state.zones[0].cards[0].rules_en += ' changed'; },
+    d => { d.state.zones[0].cards[0].abilities[0].cost.amount++; },
+    d => { d.state.pending_request.cards[0].target_instance_ids.push(101); },
+    d => { d.state.pending_request.cost_selection.weights.push(3); },
+  ]) {
+    const h = await setup(t, { presentation: 'compact', initial: d => {
+      Object.assign(d.state.zones[0].cards[0], { rules_en: 'Exact rules', abilities: [{ cost: { amount: 1 } }] });
+      Object.assign(d.state.pending_request, { cards: [{ instance_id: 202, target_instance_ids: [202] }],
+        cost_selection: { weights: [1, 2] } });
+    } });
+    const first = await ready(h);
+    await h.change(mutate);
+    assert.equal((await h.session.act(first.token, input)).reason, 'decision_changed');
+    assert.equal((await h.session.details(first.token, { path: ['pending_request'] })).status, 'blocked');
+    assert.notEqual((await h.session.next({ timeoutMs: 0 })).token, first.token);
+    assert.deepEqual(h.calls, ['capture']);
+  }
+});
+
+test('capture state changes still allow effect review but never associate the image with the new token', async t => {
+  const h = await setup(t, { onCapture: async (h, n) => {
+    if (n === 2) await h.change(d => { d.state.zones[1].cards[0].power++; });
+  } });
+  const first = await ready(h);
+  const acted = await h.session.act(first.token, input);
+  assert.equal(acted.candidate_token, null);
+  assert.notEqual(h.arena.refreshEvidence.before.fingerprint, h.arena.refreshEvidence.after.fingerprint);
+  const review = await h.session.confirm({ ...acted, status: 'confirmed', note: 'Effect visibly accepted; layout needs a fresh review.', next: true });
+  assert.equal(review.next.frame_reuse, null);
+  assert.equal((await h.session.bind(review.next.token, { generation: acted.generation, note: 'Old frame', intent: intention })).reason, 'frame_not_for_decision');
+  assert.deepEqual(h.calls, ['capture', 'click', 'capture']);
+});
+
+test('post-capture changes, expiry, cancellation, external capture and consumed frame reject reuse', async t => {
+  for (const mode of ['changed', 'expired', 'cancelled', 'external', 'consumed']) {
+    await t.test(mode, async child => {
+      const h = await setup(child, { decisionTimeoutMs: 1000, onInput: async h => h.change(d => {
+        d.state.game_state_id++; d.state.pending_request.game_state_id++; d.state.pending_request.msg_id++;
+      }) });
+      const first = await ready(h), acted = await h.session.act(first.token, input);
+      const originalCandidate = acted.candidate_token;
+      assert.ok(originalCandidate);
+      if (mode === 'changed') await h.change(d => { d.state.zones[1].cards[0].power++; });
+      if (mode === 'expired') { h.advance(1001); await h.change(); }
+      if (mode === 'cancelled') await h.session.cancel('operator');
+      if (mode === 'external') await h.arena.observe();
+      if (mode === 'consumed') h.arena.invalidate(); // State is null even though generation has not advanced.
+      if (mode === 'external' || mode === 'consumed') {
+        assert.equal((await h.session.confirm({ ...acted, status: 'confirmed', note: 'Stale frame' })).status, 'blocked');
+        await h.session.confirm({ decisionSeq: acted.decisionSeq, generation: h.arena.generation, status: 'uncertain', note: 'Frame lost' });
+      } else if (mode !== 'cancelled') {
+        await h.session.confirm({ ...acted, status: 'confirmed', note: 'Previous effect inspected' });
+      }
+      const next = await h.session.next({ timeoutMs: 0 });
+      assert.equal(next.status, 'needs_decision');
+      assert.equal(next.frame_reuse, null);
+      assert.notEqual(next.token, originalCandidate);
+      assert.equal((await h.session.bind(next.token, { generation: h.arena.generation, note: 'No reassociation', intent: intention })).reason, 'frame_not_for_decision');
+      assert.equal(h.calls.filter(call => call === 'click').length, 1);
+    });
+  }
+});
+
+test('expiry during capture cannot renew the token against the same returned frame', async t => {
+  const h = await setup(t, { decisionTimeoutMs: 1000, onCapture: async (h, n) => {
+    if (n === 2) { h.advance(1001); await h.change(); }
+  } });
+  const first = await ready(h), acted = await h.session.act(first.token, input);
+  assert.equal(acted.candidate_token, null);
+  const review = await h.session.confirm({ ...acted, status: 'confirmed', note: 'Effect checked after budget', next: true });
+  assert.notEqual(review.next.token, first.token);
+  assert.equal(review.next.frame_reuse, null);
+  assert.equal((await h.session.bind(review.next.token, { generation: acted.generation, note: 'Old candidate', intent: intention })).reason, 'frame_not_for_decision');
+});
+
+test('failed read-only state sampling preserves the sent input and its effect-review frame', async t => {
+  const h = await setup(t);
+  const first = await ready(h);
+  const original = h.arena.act;
+  h.arena.act = (input, decision, previous, evidence) => original(input, decision, previous,
+    { sampleState: async () => { throw new Error('synthetic sample failure'); } });
+  const acted = await h.session.act(first.token, input);
+  assert.equal(acted.reason, 'verify_effect');
+  assert.equal(acted.candidate_token, null);
+  assert.ok(acted.frame);
+  assert.equal(h.arena.refreshEvidence.before.error, 'Error: synthetic sample failure');
+  assert.equal((await h.session.confirm({ ...acted, status: 'confirmed', note: 'The returned image proves the effect.' })).reason, 'effect_recorded');
+  assert.deepEqual(h.calls, ['capture', 'click', 'capture']);
+});
+
+test('cancellation during input refresh cannot publish or bind the stable returned frame', async t => {
+  const h = await setup(t, { onCapture: async (h, n) => {
+    if (n === 2) await h.session.cancel('operator took over during capture');
+  } });
+  const packet = await ready(h), acted = await h.session.act(packet.token, input);
+  assert.equal(acted.reason, 'cancelled');
+  assert.equal(acted.input_may_have_been_sent, true);
+  assert.ok(acted.frame);
+  assert.equal(h.session.token, null);
+  const next = await h.session.next({ timeoutMs: 0 });
+  assert.equal(next.frame_reuse, null);
+  assert.equal((await h.session.bind(next.token, { generation: h.arena.generation, note: 'Cancelled frame', intent: intention })).reason, 'frame_not_for_decision');
+  assert.deepEqual(h.calls, ['capture', 'click', 'capture']);
+});
+
+test('a refresh without any screenshot cannot support image confirmation or next-frame reuse', async t => {
+  const h = await setup(t, { emptyCaptureAt: 2 });
+  const packet = await ready(h), acted = await h.session.act(packet.token, input);
+  assert.equal(acted.candidate_token, null);
+  assert.equal((await h.session.confirm({ ...acted, status: 'confirmed', note: 'No image to inspect' })).reason, 'effect_observation_unavailable');
+  assert.equal((await h.session.bind(packet.token, { generation: acted.generation, note: 'No image', intent: intention })).reason, 'effect_unconfirmed');
+  assert.deepEqual(h.calls, ['capture', 'click', 'capture']);
 });

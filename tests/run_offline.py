@@ -115,6 +115,7 @@ def main():
             if args.suite != 'python':
                 suites.append(('javascript', [args.node, '--test', 'tests/test_arena_ui.mjs',
                                              'tests/test_state_contract.mjs', 'tests/test_match_session.mjs',
+                                             'tests/test_frame_crop.mjs',
                                              'tests/test_repl_preflight.mjs',
                                              'tests/test_temp_support.mjs']))
             for name, argv in suites:

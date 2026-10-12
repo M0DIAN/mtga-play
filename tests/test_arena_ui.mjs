@@ -68,6 +68,23 @@ test('no input before fresh observation', async t => {
   assert.deepEqual(calls, []);
 });
 
+test('read-only refresh samples surround exact capture after input and optional focus restoration', async t => {
+  const { controller, calls } = await setup(t, { activateBeforeCapture: true });
+  await controller.observe();
+  calls.length = 0;
+  const frame = await controller.act({ kind: 'key', key: 'space' }, { chosen_action: 'pass', stage: 'gameplay' }, undefined,
+    { sampleState: async () => { calls.push(['sample']); return { fingerprint: 'same-B', actionable: true }; } });
+  assert.deepEqual(calls.map(row => row[0]), ['key', 'activate', 'sample', 'capture', 'sample']);
+  const proof = controller.refreshEvidence;
+  assert.equal(frame, controller.state);
+  assert.equal(proof.controllerId, controller.controllerId);
+  assert.equal(proof.generation, controller.generation);
+  assert.deepEqual(proof.screenshotIds, ['frame-2']);
+  assert.equal(proof.before.fingerprint, proof.after.fingerprint);
+  proof.before.fingerprint = 'caller mutation';
+  assert.equal(controller.refreshEvidence.before.fingerprint, 'same-B');
+});
+
 test('opt-in focus restoration precedes every capture and records no foreground assertion', async t => {
   const { controller, calls, journalPath } = await setup(t, { activateBeforeCapture: true });
   await controller.observe();

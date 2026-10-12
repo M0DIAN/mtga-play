@@ -6,7 +6,7 @@ import { createContext, SourceTextModule, SyntheticModule } from 'node:vm';
 
 const [mode, tempRoot, bootstrapPath] = process.argv.slice(2);
 const sourceRoot = new URL('../scripts/', import.meta.url);
-const allowed = new Set(['node:fs/promises', 'node:path', 'node:crypto', 'node:perf_hooks']);
+const allowed = new Set(['node:fs/promises', 'node:path', 'node:crypto', 'node:perf_hooks', 'node:zlib']);
 async function sandbox(pathImplementation) {
   const context = createContext({ structuredClone, setTimeout, clearTimeout },
     { codeGeneration: { strings: false, wasm: false } });
@@ -42,11 +42,13 @@ async function sandbox(pathImplementation) {
     await module.evaluate();
     return module;
   };
-  const environment = new SourceTextModule('export const processType = typeof process; await import("node:process");',
+  const environment = new SourceTextModule('export const processType = typeof process; export const bufferType = typeof Buffer; export const browserType = typeof document; await import("node:process");',
     { context, importModuleDynamically: dynamic });
   await environment.link(() => {});
   await assert.rejects(environment.evaluate(), /Unsupported REPL import: node:process/);
   assert.equal(environment.namespace.processType, 'undefined');
+  assert.equal(environment.namespace.bufferType, 'undefined');
+  assert.equal(environment.namespace.browserType, 'undefined');
   return { context, load, link, dynamic };
 }
 

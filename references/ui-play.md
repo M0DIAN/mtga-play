@@ -2,7 +2,7 @@
 
 v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局对象管理决策版本、时限和帧绑定。本文件保留底层单步 API、校准与既往客户端证据。严格输入现已重算日志有效性；旧版只比较请求编号的说明和历史结果不代表当前完整门槛。
 
-先读 computer-use 的指导文档，使用 `node_repl` 中的 `@oai/sky`。从实际返回的 app/window 对象选唯一 MTGA 窗口，不能硬编码窗口句柄。截图自动展示后直接检查，不重复解码或输出像素来观察。
+先读 computer-use 的指导文档，使用 `node_repl` 中的 `@oai/sky`。从实际返回的 app/window 对象选唯一 MTGA 窗口，不能硬编码窗口句柄。截图自动展示后直接检查；仅在本任务明确需要当前帧局部细看时，使用下述只读裁剪，仍保留全图。
 
 ## 可复用记录器
 
@@ -10,10 +10,10 @@ v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局
 
 在已通过 `sky.list_apps()` 等方法取得当前 `gameWindow` 后：
 
-本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController`、`globalThis.createMatchSession` 和 `globalThis.runReplPreflight`，共享本次加载的状态契约，不发送 UI 输入。先按 [会话协调器](realtime-session.md) 调用 `runReplPreflight({tempRoot: '<已有可写评估目录的绝对路径>'})`，确认无输入合成检查与清理通过，再使用下例的 options 创建真实控制器；预检通过仍不表示真实基线已就绪。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
+本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController`、`globalThis.createMatchSession`、`globalThis.cropCurrentFrame`、`globalThis.cropPNG` 和 `globalThis.runReplPreflight`，共享本次加载的状态契约，不发送 UI 输入。先按 [会话协调器](realtime-session.md) 调用 `runReplPreflight({tempRoot: '<已有可写评估目录的绝对路径>'})`，确认无输入合成检查与清理通过，再使用下例的 options 创建真实控制器；预检通过仍不表示真实基线已就绪。不要改试 data URL 模块导入、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 模块和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
 
 ```js
-globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.4");
+globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.5");
 globalThis.arena = await arenaModule.createArenaController(sky, {
   window: gameWindow,
   activateBeforeCapture: true,
@@ -38,7 +38,7 @@ await arena.act(
 );
 ```
 
-坐标只是格式示例，实际必须来自刚检查的截图。`act` 消耗当前观察、发送一次输入并立即刷新；内部不猜测游戏效果。返回的截图就是下一次决策的观察，稳定清楚时无需重复 `observe()`。
+坐标只是格式示例，实际必须来自刚检查的截图。`act` 消耗当前观察、发送一次输入并立即刷新；内部不猜测游戏效果。协调器还检查截图两侧的完整状态证据，只在返回候选仍有效且模型检查后才复用为下一决策。底层 `arena.act` 未传只读采样器的刷新不具备这项自动复用资格。
 
 检查该帧后，在下一调用中将上一输入的效果确认与一个新输入一起记录：
 
@@ -96,6 +96,40 @@ helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`
 - 场上物件移走或新物件入场会重排布局。牺牲左侧构装体后剩余构装体移到中间，不能沿用右侧旧坐标。
 - 选择攻击者与确认攻击是两步。检查攻击数量与召唤失调，不能将“全部攻击”第一次点击当作已完成战斗。
 - 空格在首局未推进阶段。优先用当前截图中的“下一步/结束回合”按钮，并核对下一阶段文字。保留可用异能时客户端可能停留在伤害前优先权。
+
+## 当前帧的只读裁剪（v0.4.5）
+
+`scripts/frame_crop.mjs` 是当前截图的局部查看辅助，不识别卡牌或生成位置。模型先检查完整帧，再明确选择本帧 ROI；不得保存未来布局坐标。输入仅接受 `coordinateSpace: 'screenshot'` 的逻辑像素矩形；`controllerId/generation/screenshotId` 必须全部来自当前已返回帧。`Screenshot.url` 是实际图像 data URL，`width/height` 是可选逻辑尺寸，不能假定等于编码像素。缺少逻辑尺寸时拒绝；默认 PNG renderer 从字节头读取编码尺寸并返回比例、逻辑矩形及向外取整后的编码矩形。`originX/originY` 仅记录屏幕原点，不充当窗口输入校准。
+
+普通 ESM 导入如下；bootstrap 已导出同名函数，不需要再导入。变量矩形必须取自当前全图中实际需要细看的区域：
+
+```js
+var { cropCurrentFrame, cropPNG } = await import('file:///E:/MTGA/skills/mtga-play/scripts/frame_crop.mjs?v=0.4.5');
+var sourceGeneration = arena.generation;
+var shot = arena.state.screenshots.find(s => s.id === inspectedScreenshotId);
+var crop = await cropCurrentFrame(arena, {
+  controllerId: arena.controllerId, generation: sourceGeneration, screenshotId: shot.id,
+  coordinateSpace: 'screenshot',
+  rect: { x: inspectedLeft, y: inspectedTop, width: inspectedWidth, height: inspectedHeight }
+});
+await nodeRepl.emitImage(crop.image.url);
+// crop.full_frame 保留原图；crop.source / mapping / rect / pixelRect 保留完整来源与映射。
+```
+
+默认只支持有界（最多 16M 编码像素）、8 位、非交错 PNG，支持灰度、RGB、RGBA、灰度透明及 8 位调色板，并校验字节边界、CRC 与行过滤器。格式不支持时明确拒绝，不安装 OCR 或图像依赖。仅使用 Node 内置 `node:zlib`，不依赖 `Buffer` 全局或浏览器 canvas。
+
+可选第三个参数是可信的只读 renderer；参数**只有** `{url, pixelRect}`，不得调用电脑后端或修改会话。传自定义 renderer 时还须明确给出由实际图像确定的 `encodedSize: {width, height}`；返回 `{url, width, height}` 必须是该编码矩形的真实裁剪。以下是可运行的 PNG callback 示例（尺寸读取自前一次默认 PNG 路径，仍在同一当前 generation 内）：
+
+```js
+var callbackCrop = await cropCurrentFrame(arena, {
+  controllerId: crop.source.controllerId, generation: crop.source.generation,
+  screenshotId: crop.source.screenshotId, coordinateSpace: 'screenshot', rect: crop.rect,
+  encodedSize: { width: crop.mapping.encodedWidth, height: crop.mapping.encodedHeight }
+}, async ({url, pixelRect}) => cropPNG({url, pixelRect}));
+await nodeRepl.emitImage(callbackCrop.image.url);
+```
+
+调用前后都核对源帧对象、截图身份/字节/尺寸与 generation，异步 renderer 期间发生输入、失效或刷新即拒绝结果；有限值、正尺寸及逻辑/编码完整边界均验证。任意 callback 没有沙箱隔离，契约及尺寸检查不能证明一个不可信 callback 的内容正确。裁剪不刷新画面，不延长 token，不确认效果，不建立输入绑定；模型仍须检查完整上下文及最终返回图，后续输入继续使用已验证的窗口校准。离线像素回归和合成预检不代表真实 MTGA 截图格式已验收。
 
 ## 占卜与拖动
 

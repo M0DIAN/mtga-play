@@ -32,7 +32,7 @@ export async function createArenaController(sky, options) {
     throw new Error('Journal sequence or session mismatch');
   }
   let sequence = events.length, state = null, generation = 0, pendingDecision = null, busy = false;
-  let capturedAt = null, captureMs = null;
+  let capturedAt = null, captureMs = null, refreshEvidence = null;
   let focusRestoration = null, timedDrag = null, failedTimedDrag = false;
   const elapsed = start => Math.max(0, Math.round((monotonicNow() - start) * 1000) / 1000);
 
@@ -51,8 +51,9 @@ export async function createArenaController(sky, options) {
     try { return await work(); } finally { busy = false; }
   }
 
-  async function capture() {
+  async function capture(sampleState) {
     state = null;
+    refreshEvidence = null;
     capturedAt = null;
     const started = monotonicNow();
     focusRestoration = null;
@@ -64,12 +65,23 @@ export async function createArenaController(sky, options) {
         focusRestoration.completed = true;
       } catch (error) { focusRestoration.error = String(error); throw error; }
     }
+    // Sample after input/focus restoration, immediately around this exact capture.
+    // Sampling failure must not discard an otherwise useful effect-review image.
+    const sample = async () => {
+      try { return typeof sampleState === 'function' ? await sampleState() : null; }
+      catch (error) { return { error: String(error) }; }
+    };
+    const before = await sample();
     const next = await sky.get_window_state({ window });
+    const captureReturnedAt = monotonicNow();
+    const after = await sample();
     captureMs = elapsed(started);
-    capturedAt = monotonicNow();
+    capturedAt = captureReturnedAt; // Post-capture sampling remains in since_capture.
     window = next.window;
     state = next;
     generation += 1;
+    refreshEvidence = { controllerId, generation,
+      screenshotIds: (next.screenshots ?? []).map(shot => shot.id), before, after };
     return next;
   }
 
@@ -226,6 +238,7 @@ export async function createArenaController(sky, options) {
     get requiresExpectedRequest() { return options.requireExpectedRequest === true; },
     get controllerId() { return controllerId; },
     get state() { return state; },
+    get refreshEvidence() { return state ? structuredClone(refreshEvidence) : null; },
     get window() { return window; },
     get lastDecisionSeq() { return pendingDecision; },
     get generation() { return generation; },
@@ -241,10 +254,10 @@ export async function createArenaController(sky, options) {
       if (!event || typeof event.type !== 'string') throw new Error('Event type required');
       return exclusive(() => record(event));
     },
-    async observe() {
+    async observe({ sampleState } = {}) {
       return exclusive(async () => {
         let next;
-        try { next = await capture(); }
+        try { next = await capture(sampleState); }
         catch (error) {
           await record({ type: 'observation_failed', error: String(error), focus_restoration: focusRestoration });
           throw error;
@@ -256,7 +269,7 @@ export async function createArenaController(sky, options) {
         return next;
       });
     },
-    async act(input, decision, previousEffect) {
+    async act(input, decision, previousEffect, { sampleState } = {}) {
       return exclusive(async () => {
         if (!state) throw new Error('No fresh observation; observe and inspect before input');
         if (!decision?.chosen_action) throw new Error('Record semantic intention before input');
@@ -288,7 +301,7 @@ export async function createArenaController(sky, options) {
           const inputStarted = monotonicNow();
           try { await sky[dispatch.method](dispatch.params); }
           finally { inputMs = elapsed(inputStarted); }
-          const next = await capture();
+          const next = await capture(sampleState);
           await record({ type: 'execution', decision_seq: pendingDecision, generation,
             timing: { input_ms: inputMs, capture_ms: captureMs, action_cycle_ms: elapsed(cycleStarted) },
             ...(focusRestoration ? { focus_restoration: focusRestoration } : {}),

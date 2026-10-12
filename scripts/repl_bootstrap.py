@@ -51,6 +51,12 @@ def bootstrap_source():
         "export async function createMatchSession(arena, options) {":
             "globalThis.createMatchSession = async function createMatchSession(arena, options) {",
     })
+    crop = _module_source("frame_crop.mjs", {
+        "import { inflateSync, deflateSync } from 'node:zlib';":
+            "const { inflateSync, deflateSync } = await import('node:zlib');",
+        "export function cropPNG(": "function cropPNG(",
+        "export async function cropCurrentFrame(": "async function cropCurrentFrame(",
+    })
     preflight = _module_source("repl_preflight.mjs", {
         "import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';":
             "const { mkdtemp, writeFile, readFile, rm, stat } = await import('node:fs/promises');",
@@ -60,12 +66,17 @@ def bootstrap_source():
             "const createArenaController = mtgaCreateArenaController;",
         "import { createMatchSession } from './match_session.mjs';":
             "const createMatchSession = mtgaCreateMatchSession;",
+        "import { cropPNG, cropCurrentFrame } from './frame_crop.mjs';":
+            "const { cropPNG, cropCurrentFrame } = mtgaCropHelpers;",
         "export async function runReplPreflight({ tempRoot } = {}) {":
             "globalThis.runReplPreflight = async function runReplPreflight({ tempRoot } = {}) {",
     })
     return ("{\nlet mtgaAssessReadiness;\n{\n" + contract
             + "mtgaAssessReadiness = assessReadiness;\n}\n{\n" + controller
             + "}\n{\n" + session + "}\n"
+            + "let mtgaCropHelpers;\n{\n" + crop
+            + "mtgaCropHelpers = { cropPNG, cropCurrentFrame };\n"
+            + "globalThis.cropPNG = cropPNG; globalThis.cropCurrentFrame = cropCurrentFrame;\n}\n"
             + "const mtgaCreateArenaController = globalThis.createArenaController;\n"
             + "const mtgaCreateMatchSession = globalThis.createMatchSession;\n{\n"
             + preflight + "}\n}\n")
