@@ -1,0 +1,4 @@
+interface:
+  display_name: "MTGA 对局"
+  short_description: "读取本地牌组与规则，自主操作 MTGA 对局并复盘、整理训练数据"
+  default_prompt: "使用 $mtga-play，用当前套牌打一局 Sparky 人机，将复盘和候选训练数据保存到 E:\\MTGA。"
