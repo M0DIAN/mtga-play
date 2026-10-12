@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from match_timing import analyze_events
+from match_timing import analyze_events, distribution
 
 
 def event(seq, seconds, kind, **fields):
@@ -73,6 +73,121 @@ class TimingTests(unittest.TestCase):
         for value in [-1, float('inf'), float('nan')]:
             with self.assertRaises(ValueError):
                 analyze_events([event(1, 0, 'decision', timing={'since_capture_ms': value})])
+
+    def test_fallback_capture_is_one_input_refresh_and_navigation_is_excluded(self):
+        for identity in [{}, {'controller_id': 'controller-a'}]:
+            with self.subTest(identity=identity):
+                events = [
+                    event(1, 0, 'observation', generation=1, timing={'capture_ms': 2}, **identity),
+                    event(2, 1, 'decision', stage='navigation', **identity),
+                    event(3, 2, 'execution', decision_seq=2, generation=2,
+                          execution='sent_and_refreshed', timing={'capture_ms': 10}, **identity),
+                    event(4, 3, 'match_start'),
+                    event(5, 4, 'observation', generation=3, screenshots=[{'id': 'initial'}],
+                          timing={'capture_ms': 30}, **identity),
+                    event(6, 5, 'decision', generation=3, **identity),
+                    event(7, 6, 'observation', generation=4, screenshots=[{'id': 'fallback'}],
+                          timing={'capture_ms': 20}, **identity),
+                    event(8, 6.1, 'execution', decision_seq=6, generation=4,
+                          request_binding_mode='visual_fallback', capture_already_counted=True,
+                          timing={'input_ms': 8, 'capture_ms': 20, 'action_cycle_ms': 35}, **identity),
+                    event(9, 7, 'decision', generation=4, **identity),
+                    event(10, 8, 'execution', decision_seq=9, generation=5,
+                          execution='sent_and_refreshed',
+                          timing={'input_ms': 10, 'capture_ms': 11, 'action_cycle_ms': 22}, **identity),
+                    event(11, 9, 'observation', observation='Board unchanged'),
+                    event(12, 10, 'game_result', result='win'),
+                ]
+                report = analyze_events(events)
+                captures = report['captures']
+                self.assertEqual(captures['unique_count'], 3)
+                self.assertEqual(captures['input_refresh_count'], 2)
+                self.assertEqual(captures['extra_observe_count'], 1)
+                self.assertEqual(captures['duplicate_record_count'], 1)
+                self.assertEqual(captures['coverage']['status'], 'complete')
+                self.assertEqual(captures['capture_timing']['all']['total_s'], .061)
+                self.assertEqual(captures['capture_timing']['input_refresh']['count'], 2)
+                self.assertEqual(captures['capture_timing']['extra_observe']['total_s'], .03)
+                self.assertEqual(report['raw_observation_event_count'], 3)
+                self.assertEqual(report['standalone_observation_count'], report['raw_observation_event_count'])
+                self.assertEqual(analyze_events(events, start_seq=1)['captures']['unique_count'], 5)
+
+    def test_controller_restarts_are_distinct_and_legacy_collisions_stay_unknown(self):
+        events = [event(1, 0, 'match_start'),
+                  event(2, 1, 'observation', controller_id='first', generation=1),
+                  event(3, 2, 'observation', controller_id='second', generation=1)]
+        self.assertEqual(analyze_events(events)['captures']['unique_count'], 2)
+        for e in events:
+            e.pop('controller_id', None)
+        captures = analyze_events(events)['captures']
+        self.assertIsNone(captures['unique_count'])
+        self.assertIsNone(captures['extra_observe_count'])
+        self.assertEqual(captures['coverage']['ambiguous_generation_seqs'], [2, 3])
+        # A later explicit game boundary safely scopes legacy generation reuse.
+        events.insert(2, event(3, 1.5, 'game_start'))
+        events[-1]['seq'] = 4
+        self.assertEqual(analyze_events(events)['captures']['unique_count'], 2)
+
+    def test_text_notes_and_uncertain_inputs_without_screenshots_are_not_captures(self):
+        events = [event(1, 0, 'match_start'),
+                  event(2, 1, 'observation', observation='Opponent thinking'),
+                  event(3, 2, 'decision'),
+                  event(4, 3, 'execution', decision_seq=3, execution='uncertain', generation=8,
+                        timing={'input_ms': 10, 'action_cycle_ms': 20}),
+                  event(5, 4, 'observation', generation=9, screenshots=[], timing={'capture_ms': 5})]
+        captures = analyze_events(events)['captures']
+        self.assertEqual(captures['unique_count'], 0)
+        self.assertEqual(captures['input_refresh_count'], 0)
+        self.assertEqual(captures['coverage']['text_observation_count'], 1)
+        self.assertEqual(captures['coverage']['uncertain_without_capture_seqs'], [4])
+        self.assertEqual(captures['coverage']['empty_screenshot_seqs'], [5])
+        self.assertIsNone(captures['capture_timing']['all']['total_s'])
+
+    def test_incomplete_legacy_capture_identity_and_missing_timings_are_explicit(self):
+        events = [event(1, 0, 'match_start'),
+                  event(2, 1, 'observation', generation=1),
+                  event(3, 2, 'decision'),
+                  event(4, 3, 'execution', decision_seq=3, generation=2, timing={'capture_ms': 5}),
+                  event(5, 4, 'observation', timing={'capture_ms': 7}),
+                  event(6, 5, 'observation', screenshots=[{'id': 'legacy-no-generation'}])]
+        report = analyze_events(events)
+        captures = report['captures']
+        self.assertIsNone(captures['unique_count'])
+        self.assertEqual(captures['confirmed_counts']['unique_count'], 2)
+        self.assertEqual(captures['coverage']['status'], 'partial')
+        self.assertEqual(captures['coverage']['missing_capture_evidence_seqs'], [5])
+        self.assertEqual(captures['coverage']['missing_capture_identity_seqs'], [6])
+        self.assertEqual(captures['capture_timing']['all']['eligible_count'], 2)
+        self.assertEqual(captures['capture_timing']['all']['missing_count'], 1)
+        self.assertEqual(captures['capture_timing']['all']['coverage_fraction'], .5)
+        # Old raw measurement keys retain known durations, not fabricated zeroes.
+        self.assertEqual(report['instrumented']['observation.capture_ms']['total_s'], .007)
+        self.assertEqual(report['instrumented']['observation.capture_ms']['missing_count'], 2)
+        self.assertIsNone(report['instrumented']['execution.input_ms']['total_s'])
+        self.assertEqual(report['instrumented']['execution.input_ms']['missing_count'], 1)
+
+    def test_outside_boundary_or_orphan_fallback_cannot_create_a_capture(self):
+        events = [event(1, 0, 'decision', stage='navigation'),
+                  event(2, 1, 'observation', controller_id='a', generation=1),
+                  event(3, 2, 'match_start'),
+                  event(4, 3, 'execution', controller_id='a', decision_seq=1,
+                        generation=1, capture_already_counted=True)]
+        captures = analyze_events(events)['captures']
+        self.assertEqual(captures['unique_count'], 0)
+        self.assertEqual(captures['coverage']['capture_outside_boundary_seqs'], [4])
+        events[-1]['generation'] = 2
+        captures = analyze_events(events)['captures']
+        self.assertIsNone(captures['unique_count'])
+        self.assertEqual(captures['coverage']['unresolved_reference_seqs'], [4])
+
+    def test_p95_is_nearest_rank_and_retains_sample_count(self):
+        result = distribution(list(range(1, 21)), eligible_count=21)
+        self.assertEqual(result['p95_s'], 19)
+        self.assertEqual(result['max_s'], 20)
+        self.assertEqual(result['count'], 20)
+        self.assertEqual(result['missing_count'], 1)
+        self.assertEqual(distribution([1, 2, 3])['p95_s'], 3)
+        self.assertIsNone(distribution([])['p95_s'])
 
 
 if __name__ == '__main__':

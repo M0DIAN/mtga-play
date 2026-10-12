@@ -24,9 +24,10 @@ python -B -X utf8 <skill>/scripts/track_state.py status --state '<本局目录>/
 
 ## 决策与效果证据
 
-- 检查 `ready_for_decision` 和 `fallback_reasons`。默认要求监听心跳与最近游戏事件都在5秒内、追到文件末尾、已有完整基线且增量连续、当前仍在对局。心跳新鲜不能使旧对局状态变新；`status` 每次重新计算新鲜度。遇到长时间等待合法输入，可以看当前截图确认提示，不把旧状态擅自标为新鲜。
-- 开始新局后先等待新的 `match_key` 和完整基线，再使用该局回合/生命；点击开始前的最后一份 state 可能仍是上一局结束。`ready_for_decision` 只表示还原与新鲜度通过，不代表本方有优先权；另核对 `decisionPlayer`、当前请求和时机。
+- 检查 `ready_for_decision` / `fallback_reasons` 及 `ready_for_action` / `action_blockers`。默认要求监听心跳在5秒内、追到文件末尾、已有完整基线且增量连续、当前仍在对局。最近游戏事件一般也须在5秒内；若仍在等待同一受支持的当前己方请求，允许事件年龄更长。该例外不豁免心跳、缺口或请求有效性。`status` 和界面输入会分别在使用时重新计算，不信任文件中可能过期的就绪布尔值。
+- 开始新局后先等待新的 `match_key` 和完整基线，再使用该局回合/生命；点击开始前的最后一份 state 可能仍是上一局结束。`ready_for_decision` 只表示观察状态可用；`ready_for_action` 额外要求己方决定权、受支持请求、相同状态编号与有效请求身份。两者仍不能证明界面已重绘或策略正确。
 - 缺失 `prevGameStateId` 链接、中途从日志尾开始、乱序、未完成写入、未知请求或请求对应旧状态，都不能作为完整决策依据。已有对象继续输出供诊断，`coverage.continuous=false` 明示部分状态，直到新的完整快照才恢复。
+- `last_received_event_time` 仅表示收到消息，不能使旧状态重新有效。`source_state_time` / `source_request_time` 来自已应用的状态与有效请求；必要状态无法解析会保留缺口。
 - 区域列表是权威成员列表；对象按 instanceId 保存当前特征。变区可能产生新instanceId，不能把原实例当作同一区域的永久物。日志中列出的区域/对象是实体替换：省略成员表示空区，省略横置字段表示false。不能做普通字典浅合并而留下幽灵堆叠或横置状态。
 - `GroupReq` 给出实际可看的占卜牌及分组边界；`GroupResp` 只表示客户端提交。`AnnotationType_Scry` 的 `topIds/bottomIds` 才是服务器确认，保留顺序并允许空列表。它不能验证点击完成之前的中间拖动位置，那个反馈仍看画面。
 - `ZoneType_Stack` 给出当前对象，`AnnotationType_TargetSpec` 给出目标实例。入场触发和起动式异能可能在Pending区，再进入Stack；不要把“堆叠空”误解为“没有待处理触发”。必要时看 `--full` 的Pending区。

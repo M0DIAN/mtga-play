@@ -7,6 +7,29 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createArenaController } from '../scripts/arena_ui.mjs';
 
+
+const WALL_NOW = Date.parse('2026-10-12T08:00:00Z');
+
+async function requestFixture() {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/request_advance.json', import.meta.url), 'utf8'));
+  // The original fixture contains only historical request identities. These
+  // liveness and state fields are synthetic test context, not recovered logs.
+  for (const document of [fixture.before, fixture.after]) {
+    document.checked_at = new Date(WALL_NOW).toISOString();
+    document.caught_up = true;
+    document.source = { generation: 1 };
+    Object.assign(document.state, {
+      game_state_id: 100,
+      source_event_time: new Date(WALL_NOW).toISOString(),
+      room_state: 'MatchGameRoomStateType_Playing',
+      game_info: {},
+    });
+    document.state.coverage.full_baseline = true;
+    Object.assign(document.state.pending_request, { game_state_id: 100, supported: true });
+  }
+  return fixture;
+}
+
 async function setup({ failInput = false, width = 1920, factory = createArenaController, logDocument, requireExpectedRequest = false, onSleep } = {}) {
   const root = process.env.MTGA_TEST_TMP || join(process.cwd(), '.mtga-test-tmp');
   await mkdir(root, { recursive: true });
@@ -26,7 +49,7 @@ async function setup({ failInput = false, width = 1920, factory = createArenaCon
   if (logDocument) await writeFile(logStatePath, JSON.stringify(logDocument));
   const controller = await factory(sky, { window, sessionId: 's', journalPath,
     logStatePath: logDocument ? logStatePath : undefined,
-    requireExpectedRequest, monotonicNow: () => now,
+    requireExpectedRequest, monotonicNow: () => now, wallNow: () => WALL_NOW + now,
     sleep: async ms => { now += ms; if (onSleep) await onSleep(ms, logStatePath); },
     calibration: { offsetX: 0, offsetY: -31, width: 1920, height: 1080 } });
   return { controller, calls, journalPath, logStatePath, advance: ms => { now += ms; } };
@@ -39,7 +62,7 @@ test('no input before fresh observation', async () => {
 });
 
 test('request changed after target auto-submission blocks stale retry without input or screenshot', async () => {
-  const fixture = JSON.parse(await readFile(new URL('./fixtures/request_advance.json', import.meta.url), 'utf8'));
+  const fixture = await requestFixture();
   const { controller, calls, journalPath, logStatePath } = await setup({ logDocument: fixture.before });
   await controller.observe();
   await writeFile(logStatePath, JSON.stringify(fixture.after));
@@ -53,7 +76,7 @@ test('request changed after target auto-submission blocks stale retry without in
 });
 
 test('unchanged live own request permits exactly one input followed immediately by capture', async () => {
-  const fixture = JSON.parse(await readFile(new URL('./fixtures/request_advance.json', import.meta.url), 'utf8'));
+  const fixture = await requestFixture();
   const { controller, calls } = await setup({ logDocument: fixture.before });
   await controller.observe();
   await controller.act({ kind:'click', x:900, y:600, coordinateSpace:'window' },
@@ -61,8 +84,69 @@ test('unchanged live own request permits exactly one input followed immediately 
   assert.deepEqual(calls.map(c=>c[0]), ['capture','click','capture']);
 });
 
+test('input gate recomputes liveness and eligibility instead of trusting persisted flags', async () => {
+  for (const change of [
+    d => { d.checked_at = '2000-01-01T00:00:00Z'; },
+    d => { d.caught_up = false; },
+    d => { d.state.pending_request.supported = false; },
+    d => { d.state.pending_request.game_state_id++; },
+    d => { d.state.game_info.results = [{ winningTeamId: 1 }]; },
+  ]) {
+    const fixture = await requestFixture();
+    change(fixture.before);
+    fixture.before.ready_for_action = true;
+    fixture.before.ready_for_decision = true;
+    const { controller, calls, journalPath } = await setup({ logDocument: fixture.before, requireExpectedRequest: true });
+    await controller.observe();
+    await assert.rejects(controller.act({ kind: 'key', key: 'space' },
+      { chosen_action: 'submit', expected_request: fixture.expected }), /request changed/);
+    assert.deepEqual(calls.map(c => c[0]), ['capture']);
+    const rows = (await readFile(journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(rows.at(-1).actual_request.ready_for_action, false);
+    assert.ok(rows.at(-1).actual_request.action_blockers.length > 0);
+  }
+});
+
+test('a healthy watcher waiting on an unchanged own request can act after an old event', async () => {
+  const fixture = await requestFixture();
+  fixture.before.state.source_event_time = new Date(WALL_NOW - 60000).toISOString();
+  fixture.before.ready_for_action = false;
+  const { controller, calls } = await setup({ logDocument: fixture.before, requireExpectedRequest: true });
+  await controller.observe();
+  await controller.act({ kind: 'key', key: 'space' }, { chosen_action: 'submit', expected_request: fixture.expected });
+  assert.deepEqual(calls.map(c => c[0]), ['capture', 'key', 'capture']);
+});
+
+test('a bound game state or log generation cannot be silently replaced under the same request', async () => {
+  for (const change of [d => { d.state.game_state_id++; d.state.pending_request.game_state_id++; },
+    d => { d.source.generation++; }]) {
+    const fixture = await requestFixture();
+    const { controller, calls, logStatePath } = await setup({ logDocument: fixture.before });
+    await controller.observe();
+    const expected = { ...fixture.expected, game_state_id: 100, source_generation: 1 };
+    change(fixture.before);
+    await writeFile(logStatePath, JSON.stringify(fixture.before));
+    await assert.rejects(controller.act({ kind: 'key', key: 'space' },
+      { chosen_action: 'submit', expected_request: expected }), /request changed/);
+    assert.deepEqual(calls.map(c => c[0]), ['capture']);
+  }
+});
+
+test('controller identity scopes screenshot generations across reconstructed controllers', async () => {
+  const first = await setup();
+  const second = await setup();
+  await first.controller.observe();
+  await first.controller.note({ type: 'diagnostic', controller_id: 'caller-cannot-replace' });
+  await second.controller.observe();
+  const rows = (await readFile(first.journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(first.controller.sessionId, 's');
+  assert.equal(first.controller.requiresExpectedRequest, false);
+  assert.notEqual(first.controller.controllerId, second.controller.controllerId);
+  assert.ok(rows.every(row => row.controller_id === first.controller.controllerId));
+});
+
 test('wrong match, stopped watcher, partial coverage, stale request or other player all block input', async () => {
-  const fixture = JSON.parse(await readFile(new URL('./fixtures/request_advance.json', import.meta.url), 'utf8'));
+  const fixture = await requestFixture();
   for (const change of [d=>d.state.match_key='other', d=>d.live=false,
     d=>d.state.coverage.continuous=false, d=>d.state.pending_request.state_current=false,
     d=>d.state.turn.decisionPlayer=2]) {
@@ -76,7 +160,7 @@ test('wrong match, stopped watcher, partial coverage, stale request or other pla
 });
 
 test('missing or malformed log cannot silently disable an explicitly requested guard', async () => {
-  const fixture = JSON.parse(await readFile(new URL('./fixtures/request_advance.json', import.meta.url), 'utf8'));
+  const fixture = await requestFixture();
   const plain=await setup(); await plain.controller.observe();
   await assert.rejects(plain.controller.act({kind:'key',key:'space'},
     {chosen_action:'target',expected_request:fixture.expected}), /requires logStatePath/);
@@ -203,7 +287,7 @@ test('failure timing remains uncertain and cannot become a confirmed effect with
   assert.deepEqual(events.at(-1).timing, { input_ms: 20, action_cycle_ms: 20 });
 });
 
-test('REPL bootstrap defines the same observed-input controller without runtime string evaluation', async () => {
+test('REPL bootstrap runs the controller and persistent session without runtime string evaluation', async () => {
   const generator = fileURLToPath(new URL('../scripts/repl_bootstrap.py', import.meta.url));
   const { stdout } = await promisify(execFile)(process.env.MTGA_PYTHON || 'python', ['-B', '-X', 'utf8', generator]);
   const root = process.env.MTGA_TEST_TMP || join(process.cwd(), '.mtga-test-tmp');
@@ -225,10 +309,35 @@ test('REPL bootstrap defines the same observed-input controller without runtime 
   const events = (await readFile(journalPath, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(events.find(e => e.type === 'effect_verification').decision_seq, first);
   assert.equal(events.at(-1).effect_status, 'unverified');
+
+  const fixture = await requestFixture();
+  const strict = await setup({ factory: globalThis.createArenaController,
+    logDocument: fixture.before, requireExpectedRequest: true });
+  const session = await globalThis.createMatchSession(strict.controller, {
+    sessionId: strict.controller.sessionId, logStatePath: strict.logStatePath,
+    wallNow: () => WALL_NOW,
+  });
+  try {
+    const packet = await session.next({ timeoutMs: 0 });
+    assert.equal(packet.status, 'needs_decision');
+    const frame = await session.observe(packet.token);
+    const bound = await session.bind(packet.token, { generation: frame.generation,
+      note: 'The visible prompt matches this decision.', intent: {
+        goal: 'Select the visible target', step: 'select_target',
+        expected_result: 'The target selection is visible',
+      } });
+    assert.equal(bound.ready_for_input, true);
+    const action = await session.act(packet.token, input);
+    assert.equal(action.reason, 'verify_effect');
+    const result = await session.confirm({ decisionSeq: action.decisionSeq,
+      generation: action.generation, status: 'confirmed', note: 'The target is selected.' });
+    assert.equal(result.intent.status, 'confirmed');
+    assert.deepEqual(strict.calls.map(c => c[0]), ['capture', 'click', 'capture']);
+  } finally { await session.close(); }
 });
 
 test('strict live controller blocks absent binding with no input/capture and clears old frame', async () => {
-  const fixture=JSON.parse(await readFile(new URL('./fixtures/request_advance.json',import.meta.url),'utf8'));
+  const fixture = await requestFixture();
   const {controller,calls,journalPath}=await setup({logDocument:fixture.before,requireExpectedRequest:true});
   await controller.observe();
   await assert.rejects(controller.act({kind:'key',key:'space'},
@@ -243,7 +352,7 @@ test('strict live controller blocks absent binding with no input/capture and cle
 });
 
 test('strict binding covers omitted stage; explicit navigation and bound gameplay still work', async () => {
-  const fixture=JSON.parse(await readFile(new URL('./fixtures/request_advance.json',import.meta.url),'utf8'));
+  const fixture = await requestFixture();
   const {controller,calls}=await setup({logDocument:fixture.before,requireExpectedRequest:true});
   await controller.observe();
   await assert.rejects(controller.act({kind:'key',key:'space'},{chosen_action:'unclassified'}), /request bound/);
@@ -256,7 +365,7 @@ test('strict binding covers omitted stage; explicit navigation and bound gamepla
 });
 
 test('read-only wait sees request-only progress without capturing, binding or weakening the guard', async () => {
-  const fixture=JSON.parse(await readFile(new URL('./fixtures/request_advance.json',import.meta.url),'utf8'));
+  const fixture = await requestFixture();
   fixture.before.state.game_state_id=100; // Synthetic state number; request fixture omits it.
   const {controller,calls,logStatePath,journalPath}=await setup({logDocument:fixture.before,requireExpectedRequest:true});
   await controller.observe();
@@ -274,7 +383,7 @@ test('read-only wait sees request-only progress without capturing, binding or we
 });
 
 test('wait ignores unchanged own priority and null response until a new current request arrives', async () => {
-  const fixture=JSON.parse(await readFile(new URL('./fixtures/request_advance.json',import.meta.url),'utf8'));
+  const fixture = await requestFixture();
   fixture.before.state.game_state_id=100;
   let polls=0;
   const {controller,calls}=await setup({logDocument:fixture.before,onSleep:async(ms,path)=>{
@@ -290,7 +399,7 @@ test('wait ignores unchanged own priority and null response until a new current 
 });
 
 test('wait is bounded on unchanged, unreadable, stopped and different-match projections', async () => {
-  const fixture=JSON.parse(await readFile(new URL('./fixtures/request_advance.json',import.meta.url),'utf8'));
+  const fixture = await requestFixture();
   fixture.before.state.game_state_id=100;
   const {controller,calls,logStatePath}=await setup({logDocument:fixture.before});
   assert.equal((await controller.waitForProgress(fixture.before.state,{timeoutMs:400,settleMs:0})).status,'timeout');
@@ -309,7 +418,7 @@ test('wait is bounded on unchanged, unreadable, stopped and different-match proj
 });
 
 test('partial log progress and completed-game evidence never restore continuous input eligibility', async () => {
-  const fixture=JSON.parse(await readFile(new URL('./fixtures/request_advance.json',import.meta.url),'utf8'));
+  const fixture = await requestFixture();
   fixture.before.state.game_state_id=100;
   const partial=structuredClone(fixture.before);partial.state.coverage.continuous=false;
   const {controller,calls,logStatePath}=await setup({logDocument:partial,requireExpectedRequest:true});

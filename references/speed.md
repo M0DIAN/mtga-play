@@ -26,6 +26,8 @@
 
 helper 自动记录输入调用、截图调用及从上一截图返回到下一次动作的间隔。`since_capture_ms` 包括看图、分析、工具往返及其它等待，不能当作纯模型思考时间。`action_cycle_ms` 包含输入、截图与前置记录，各指标存在重叠，不可相加。没有新指标的旧日志只分析事件时间戳，不把缺失值当作零。
 
+v0.4 优先读取报告的 `captures.unique_count`、`input_refresh_count` 与 `extra_observe_count`；它们按 `controller_id/generation` 识别同一截图，回退 observation/execution 只算一次输入刷新。旧记录无法唯一对应时总数为 null，并保留已确认下限与覆盖原因。`raw_observation_event_count` 是原始行数，旧 `standalone_observation_count` 仅为它的兼容别名，不能当作去重后的额外截图数。分布的 P95 使用 nearest-rank，即排序后第 `ceil(0.95*n)` 项；保留样本量和缺失指标说明，小样本不用于稳定性能结论。
+
 赛后运行：
 
 ```powershell

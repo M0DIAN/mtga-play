@@ -11,6 +11,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from arena_log import GameTracker, JsonFramer, LogFollower, decision_readiness, normalized_events, timestamp_utc
+from track_state import brief
 
 
 def zone(zone_id, kind, ids=None, owner=None):
@@ -27,8 +28,8 @@ def card(instance, grp, zone_id, owner=1, **fields):
             'controllerSeatId': owner, 'visibility': 'Visibility_Public', 'type': 'GameObjectType_Card', **fields}
 
 
-def send(tracker, gs):
-    return tracker.process({'kind': 'gre', 'message': {'type': 'GREMessageType_GameStateMessage',
+def send(tracker, gs, timestamp=None):
+    return tracker.process({'kind': 'gre', 'timestamp': timestamp, 'message': {'type': 'GREMessageType_GameStateMessage',
                            'systemSeatIds': [1], 'gameStateMessage': gs}})
 
 
@@ -155,6 +156,96 @@ class ReducerTests(unittest.TestCase):
         self.assertFalse(self.tracker.snapshot()['coverage']['continuous'])
         self.assertEqual(self.tracker.snapshot()['coverage']['gaps'][0]['kind'], 'incomplete_full_schema')
 
+    def test_unapplied_state_does_not_refresh_accepted_state_time(self):
+        old = '2026-10-12T11:59:00+00:00'
+        fresh = '2026-10-12T12:00:00+00:00'
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1}, old)
+        for state, continuous in (
+                ({'type': 'GameStateType_Diff'}, False),
+                ({'type': 'GameStateType_Unknown', 'gameStateId': 3}, False),
+                ({'type': 'GameStateType_Diff', 'gameStateId': 1, 'prevGameStateId': 0}, False),
+                ({'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1}, True)):
+            with self.subTest(state=state):
+                tracker = copy.deepcopy(self.tracker)
+                send(tracker, state, fresh)
+                snapshot = tracker.snapshot()
+                self.assertEqual(snapshot['source_event_time'], old)
+                self.assertEqual(snapshot['source_state_time'], old)
+                self.assertEqual(snapshot['last_received_event_time'], fresh)
+                self.assertEqual(snapshot['game_state_id'], 2)
+                self.assertEqual(snapshot['coverage']['continuous'], continuous)
+
+    def test_room_client_and_unrelated_gre_only_update_received_time(self):
+        old = '2026-10-12T11:59:00+00:00'
+        fresh = '2026-10-12T12:00:00+00:00'
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1}, old)
+        for event in (
+                {'kind': 'room', 'room': {'match_key': None, 'state': 'MatchGameRoomStateType_Playing'}},
+                {'kind': 'client', 'message': {'type': 'ClientMessageType_SelectNResp', 'respId': 99}},
+                {'kind': 'gre', 'message': {'type': 'GREMessageType_UIMessage', 'systemSeatIds': [1]}}):
+            self.tracker.process({**event, 'timestamp': fresh})
+            snapshot = self.tracker.snapshot()
+            self.assertEqual(snapshot['source_event_time'], old)
+            self.assertEqual(snapshot['last_received_event_time'], fresh)
+
+    def test_request_only_refreshes_time_after_valid_current_acceptance(self):
+        old = '2026-10-12T11:59:00+00:00'
+        fresh = '2026-10-12T12:00:00+00:00'
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1}, old)
+        message = {'type': 'GREMessageType_ActionsAvailableReq', 'systemSeatIds': [1],
+                   'msgId': 70, 'gameStateId': 2, 'actionsAvailableReq': {'actions': []}}
+        for patch in ({'gameStateId': 1}, {'msgId': None}, {'gameStateId': True}):
+            tracker = copy.deepcopy(self.tracker)
+            tracker.process({'kind': 'gre', 'timestamp': fresh, 'message': {**message, **patch}})
+            self.assertEqual(tracker.snapshot()['source_event_time'], old)
+            self.assertIsNone(tracker.snapshot()['source_request_time'])
+        self.tracker.process({'kind': 'gre', 'timestamp': fresh, 'message': message})
+        self.assertEqual(self.tracker.snapshot()['source_event_time'], fresh)
+        self.assertEqual(self.tracker.snapshot()['source_request_time'], fresh)
+        self.assertEqual(self.tracker.snapshot()['source_state_time'], old)
+        self.tracker.process({'kind': 'gre', 'timestamp': '2026-10-12T12:00:01+00:00',
+            'message': {'type': 'GREMessageType_UnknownReq', 'unknownReq': {}, 'systemSeatIds': [1],
+                        'msgId': 71, 'gameStateId': 2}})
+        self.assertEqual(self.tracker.snapshot()['source_event_time'], fresh)
+        self.assertFalse(self.tracker.snapshot()['pending_request']['supported'])
+
+    def test_missing_timestamp_is_not_inherited_by_new_state(self):
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1},
+             '2026-10-12T12:00:00+00:00')
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 3, 'prevGameStateId': 2})
+        self.assertIsNone(self.tracker.snapshot()['source_event_time'])
+
+    def test_unknown_state_requires_full_recovery_not_a_later_contiguous_diff(self):
+        send(self.tracker, {'type': 'GameStateType_Unknown', 'gameStateId': 2})
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1})
+        self.assertFalse(self.tracker.snapshot()['coverage']['continuous'])
+        full = {'type': 'GameStateType_Full', 'gameStateId': 2,
+                'gameInfo': {'gameNumber': 1}, 'players': [{'systemSeatNumber': 1}, {'systemSeatNumber': 2}],
+                'zones': [zone(28, 'Battlefield'), zone(27, 'Stack'), zone(31, 'Hand', [], 2)]}
+        send(self.tracker, full)
+        self.assertFalse(self.tracker.snapshot()['coverage']['continuous'])
+        full['zones'][-1]['ownerSeatId'] = 1
+        send(self.tracker, full)
+        self.assertTrue(self.tracker.snapshot()['coverage']['continuous'])
+
+    def test_brief_retains_dynamic_abilities_types_and_count_completeness(self):
+        def projected():
+            doc = {'event_seq': 1, 'live': False, 'checked_at': '2026-10-12T12:00:00+00:00',
+                   'caught_up': True, 'state': self.tracker.snapshot()}
+            doc.update(decision_readiness(doc))
+            return brief(doc)
+        before = projected()
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1,
+             'gameObjects': [card(10, 90694, 28, cardTypes=['CardType_Artifact', 'CardType_Creature'],
+                                  uniqueAbilities=[{'grpId': 354}])]})
+        after = projected()
+        self.assertEqual(after['battlefield'][0]['ability_ids'], [354])
+        self.assertEqual(after['battlefield'][0]['types'], ['CardType_Artifact', 'CardType_Creature'])
+        self.assertNotEqual(before['battlefield'][0]['ability_ids'], after['battlefield'][0]['ability_ids'])
+        self.assertTrue(after['self_artifact_count_complete'])
+        send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 4, 'prevGameStateId': 3})
+        self.assertFalse(projected()['self_artifact_count_complete'])
+
     def test_turn_replacement_does_not_leave_combat_step_in_main(self):
         send(self.tracker, {'type': 'GameStateType_Diff', 'gameStateId': 2, 'prevGameStateId': 1,
              'turnInfo': {'phase': 'Phase_Combat', 'step': 'Step_CombatDamage', 'activePlayer': 1, 'turnNumber': 2}})
@@ -206,7 +297,7 @@ class ReadinessTests(unittest.TestCase):
     def test_fresh_heartbeat_does_not_hide_old_event_or_missing_state(self):
         now = datetime.now(timezone.utc)
         doc = {'live': True, 'checked_at': now.isoformat(), 'caught_up': True,
-               'state': {'source_event_time': now.isoformat(), 'self_seat': 1,
+               'state': {'source_event_time': now.isoformat(), 'self_seat': 1, 'game_state_id': 1,
                          'coverage': {'continuous': True}, 'room_state': 'MatchGameRoomStateType_Playing'}}
         self.assertTrue(decision_readiness(doc, now=now.timestamp())['ready_for_decision'])
         stale = copy.deepcopy(doc)
@@ -214,6 +305,19 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('game_event_stale', decision_readiness(stale)['fallback_reasons'])
         doc['state']['coverage']['continuous'] = False
         self.assertIn('incomplete_state', decision_readiness(doc)['fallback_reasons'])
+
+    def test_shared_readiness_contract(self):
+        fixture = json.loads((Path(__file__).parent / 'fixtures/readiness_cases.json').read_text(encoding='utf-8'))
+        def patched(base, patch):
+            result = copy.deepcopy(base)
+            for key, value in patch.items():
+                result[key] = patched(result.get(key, {}), value) if isinstance(value, dict) else value
+            return result
+        for example in fixture['cases']:
+            with self.subTest(example=example['name']):
+                document = patched(fixture['base'], example['patch'])
+                document['ready_for_decision'] = document['ready_for_action'] = True
+                self.assertEqual(decision_readiness(document, now=fixture['now_ms'] / 1000), example['expected'])
 
 
 class CLIWatchTests(unittest.TestCase):

@@ -1,13 +1,11 @@
 ---
 name: mtga-play
-description: Play or coach Magic The Gathering Arena (MTGA) matches using visible game state and local deck/card rules, then save a replay review and curated JSONL decision data. Use for MTGA match operation, board analysis, Sparky practice, or improving this match workflow from recorded games.
-metadata:
-  version: "0.3.5"
+description: Operate or coach Magic The Gathering Arena (MTGA) matches using player-visible state, local card rules, and a persistent match session. Use for real-time match operation, board decisions, Sparky practice, or improving this workflow from recorded games.
 ---
 
 # MTGA 对局
 
-按用户指定的套牌、模式和局数完成对局，保存真实经过，并用已验证的问题改进本 skill。创建或维护 skill 本身不代表要开始另一局游戏。
+按用户指定的套牌、模式和局数完成对局，随场面变化调整打法，保存真实经过。当前版本见 `VERSION`。创建或维护 skill 本身不代表要开始另一局游戏。
 
 ## 开局与资料
 
@@ -19,11 +17,13 @@ metadata:
 
 ## 分析与操作
 
+实时对局优先读取 [会话协调器](references/realtime-session.md)，为本局创建唯一 `createMatchSession` 对象。用 `next` 等待需要处理的变化；模型负责打法与画面核对，会话负责 token、时限、帧绑定及单步记录。不要把后台监听当作后台模型调用；当前协调器不自动识别所有牌位。旧 token 失效时重新读取决策包，不替换其中版本字段后继续旧操作。
+
 执行 Windows 操作前，加载可用的 `computer-use` skill 并遵守其初始化、目标窗口和刷新流程。默认通过其 API 操作；若当前会话已经明确授权连续拖动后端例外，可按 [界面操作](references/ui-play.md) 使用本机限定的拖动 helper。保存脚本本身不代表已获使用权限。
 
 首次操作或恢复窗口前读 [界面操作](references/ui-play.md)。对每个语义动作执行：
 
-1. 先读本局新鲜、连续的日志状态，确认回合、阶段、堆叠、优先权、生命、手牌与选择提示，按卡牌规则核对法术力与攻击/阻挡资格。日志有缺口、过期或请求不受支持时用当前画面补足；不能把部分还原称为完整状态。
+1. 先读本局有效、连续的日志状态，确认回合、阶段、堆叠、优先权、生命、手牌与选择提示，按卡牌规则核对法术力与攻击/阻挡资格。区分观察可用与 `ready_for_action`；健康监听下仍等待同一有效己方请求，不仅因事件年龄要求额外截图。日志有缺口、心跳过期或请求不受支持时用当前画面补足；不能把部分还原称为完整状态。
 2. 比较少量合法候选，优先判断本回合致命、下回合生存、去除和引擎收益。费用、目标和牺牲对象分别核对。理由保持简短。
 3. 每次只发送一个 UI 输入，立即刷新截图，再判断实际效果。将定位所用帧与当时的请求绑定；读新日志不能替旧坐标更新 `expected_request`。落地/抓牌/施放后若手牌尚在重排，先只读等待相关变化，确需新坐标时补一次观察。多步施放/支付/选目标不能串成盲点脚本。`scripts/arena_ui.mjs` 可记录这条循环。
 4. 优先用服务器日志确认可核对的游戏效果，记录日志事件编号及 gameStateId；客户端响应只是提交，不是已结算。占卜用服务器 Scry 注记核对顶/底，堆叠用区域及目标注记，场面用区域成员与对象当前属性。重试目标或确认前先检查请求是否已改变；GUI 操作定位仍检查返回截图，日志缺失或动画不清楚时再额外观察。

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.mtga-test-tmp/
+.pytest_cache/
+node_modules/
+matches/
+skill_evaluations/
+log_tracker/
+*.log
+.env
+.env.*

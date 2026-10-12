@@ -1,9 +1,16 @@
 /** One observed input at a time; no automatic match loop or image processing. */
 import { readFile, appendFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
+import { randomUUID } from 'node:crypto';
+import { assessReadiness } from './state_contract.mjs';
 
 export async function createArenaController(sky, options) {
   const { sessionId, journalPath, calibration, monotonicNow = () => performance.now() } = options;
+  const { wallNow = () => Date.now(), maxAgeMs = 5000 } = options;
+  if (typeof wallNow !== 'function' || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
+    throw new Error('A wall clock and positive maxAgeMs are required');
+  }
+  const controllerId = randomUUID();
   let window = options.window;
   if (!window?.app || !Number.isInteger(window.id) || !sessionId || !journalPath) {
     throw new Error('Use a returned window object and actual session identity/path');
@@ -25,7 +32,7 @@ export async function createArenaController(sky, options) {
   async function record(event) {
     const seq = sequence + 1;
     await appendFile(journalPath, JSON.stringify({ ...event, schema_version: 1, session_id: sessionId,
-      seq, timestamp: new Date().toISOString() }) + '\n', 'utf8');
+      controller_id: controllerId, seq, timestamp: new Date().toISOString() }) + '\n', 'utf8');
     sequence = seq;
     return seq;
   }
@@ -121,17 +128,27 @@ export async function createArenaController(sky, options) {
         || typeof expected?.type !== 'string' || !Number.isInteger(expected?.msg_id)) {
       throw new Error('expected_request requires logStatePath, match_key, type and msg_id');
     }
+    for (const field of ['game_state_id', 'source_generation']) {
+      if (expected[field] !== undefined && (!Number.isInteger(expected[field]) || expected[field] < 0)) {
+        throw new Error(`expected_request.${field} must be a nonnegative integer`);
+      }
+    }
     let actual;
     try {
       const document = JSON.parse(await readFile(options.logStatePath, 'utf8'));
       const s = document.state, q = s?.pending_request;
+      const readiness = assessReadiness(document, { nowMs: wallNow(), maxAgeMs });
       actual = { match_key: s?.match_key, type: q?.type, msg_id: q?.msg_id,
         state_current: q?.state_current, decision_player: s?.turn?.decisionPlayer,
-        self_seat: s?.self_seat, continuous: s?.coverage?.continuous, live: document.live };
+        self_seat: s?.self_seat, continuous: s?.coverage?.continuous, live: document.live,
+        game_state_id: s?.game_state_id, source_generation: document.source?.generation,
+        ready_for_action: readiness.ready_for_action, action_blockers: readiness.action_blockers };
       if (actual.match_key === expected.match_key && actual.type === expected.type
           && actual.msg_id === expected.msg_id && actual.state_current === true
           && actual.decision_player === actual.self_seat && actual.self_seat != null
-          && actual.continuous === true && actual.live === true) return;
+          && readiness.ready_for_action === true
+          && (expected.game_state_id === undefined || expected.game_state_id === actual.game_state_id)
+          && (expected.source_generation === undefined || expected.source_generation === actual.source_generation)) return;
     } catch (error) { actual = { read_error: String(error) }; }
     state = null;
     capturedAt = null;
@@ -186,6 +203,10 @@ export async function createArenaController(sky, options) {
   }
 
   return {
+    get sessionId() { return sessionId; },
+    get logStatePath() { return options.logStatePath; },
+    get requiresExpectedRequest() { return options.requireExpectedRequest === true; },
+    get controllerId() { return controllerId; },
     get state() { return state; },
     get window() { return window; },
     get lastDecisionSeq() { return pendingDecision; },

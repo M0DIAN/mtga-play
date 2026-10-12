@@ -1,5 +1,7 @@
 # MTGA 界面操作
 
+v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局对象管理决策版本、时限和帧绑定。本文件保留底层单步 API、校准与既往客户端证据。严格输入现已重算日志有效性；旧版只比较请求编号的说明和历史结果不代表当前完整门槛。
+
 先读 computer-use 的指导文档，使用 `node_repl` 中的 `@oai/sky`。从实际返回的 app/window 对象选唯一 MTGA 窗口，不能硬编码窗口句柄。截图自动展示后直接检查，不重复解码或输出像素来观察。
 
 ## 可复用记录器
@@ -8,10 +10,10 @@
 
 在已通过 `sky.list_apps()` 等方法取得当前 `gameWindow` 后：
 
-本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它只定义 `globalThis.createArenaController`，不发送 UI 输入；之后使用下例的 options 调用该函数。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一 helper，避免另写不一致的记录器。
+本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController` 和 `globalThis.createMatchSession`，共享本次加载的状态契约，不发送 UI 输入；之后使用下例的 options 创建控制器。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
 
 ```js
-globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.3.5");
+globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.0");
 globalThis.arena = await arenaModule.createArenaController(sky, {
   window: gameWindow,
   sessionId: "本局实际 session_id",
@@ -58,7 +60,7 @@ await arena.confirmEffect("confirmed", "已进入选择攻击者，只有旧构�
 
 选择单个目标可能自动提交。第四局 seq92 的雕符目标已成功，seq96 重试前日志其实已进入攻击者选择；旧截图不能证明失败。准备重试或确认时，将**先前据以定位的请求**放入 decision 的 `expected_request: {match_key, type, msg_id}`，不要用刚变化的新请求给旧坐标背书。控制器在发送输入前再次读取 `logStatePath`；游戏、请求编号/类型、决定玩家、连续性或监听状态不符则写 `input_blocked`、清除坐标并停止，不发送输入也不额外截图。重新读简洁日志，判断原动作是否已完成，再按需要观察新控件。
 
-这个检查仅防止已检测到的请求改变，不证明画面已经重绘，也不替代日志新鲜度和合法性判断。输入前后仍存在状态竞争；不确定时按现有画面回退流程处理。未配置实时日志的操作保持原行为。第五局v0.3.2实际客户端已验证：seq15自然请求61→64、seq100主动零输入探针351→357均在发送输入前被拦截，未自动截图；第二次不是实际误点。控制器实现保留，不能把两次成功扩大为覆盖所有动画的保证。
+v0.4 在此检查中重算 `ready_for_action`，包括心跳、日志追赶、连续性、当前受支持请求与己方决定权。可附 `game_state_id`、`source_generation` 进一步绑定状态与日志世代；会话协调器会提供这些字段。检查不证明画面已重绘或坐标属于正确物件；输入前后仍存在状态竞争，不确定时按画面回退流程处理。未配置日志的底层导航保持原行为。第五局v0.3.2实际客户端已验证的是请求61→64与351→357拦截；后者为主动探针，不能扩大为当前版本已经实测覆盖所有动画。
 
 把请求快照保存在本次检查过的帧旁。读取新状态的函数只返回新状态，不暗中覆盖旧帧的请求；即使它显示另一个合法请求，也必须重新判断旧坐标是否可用。传入控制器的是此前定位时的请求，不是输入前才读到的请求：
 
@@ -75,7 +77,7 @@ const locatingRequest = Object.freeze({
 
 第五局seq23在落地后的重排帧上点错为改装间，虽然调用者已给出新请求。它说明请求检查无法发现“合法请求+错误坐标”。手牌成员变动后，若返回帧还显示原牌位，先等相关日志变化再按需要观察一次，核对牌名和原始牌位；不要沿用动画前的相邻卡牌中心。
 
-helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`，执行的 `input_ms/capture_ms/action_cycle_ms`，额外观察的 `capture_ms`。这些只测量工具层和调用间隔，不证明游戏效果。导入后的脚本会被 Node 缓存；更新 helper 后在下一局新建控制器时使用带版本的 import URL 或重置 REPL，避免仍调用旧模块。
+helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`，执行的 `input_ms/capture_ms/action_cycle_ms`，额外观察的 `capture_ms`。这些只测量工具层和调用间隔，不证明游戏效果。导入后的脚本及其依赖会被 Node 缓存；更新 helper 后先关闭已有会话，再在下一局重置 REPL 并重新加载，避免只更换入口 URL 却仍调用旧依赖。不要在活动对局中重复 bootstrap。
 
 观察到对局结束后，可用 `arena.note({type:"game_result", result:"win", self_life:8, opponent_life:-10})` 写入实际结果，再更新 session.json。这里的数值是格式示例，不能照抄。
 

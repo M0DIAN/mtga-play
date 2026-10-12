@@ -137,15 +137,17 @@ def brief(document):
         for zone in state.get('zones', []):
             if zone['type'] == kind and (not own or zone.get('owner') == state.get('self_seat')):
                 for card in zone.get('cards', []):
-                    result.append({k: v for k, v in card.items() if k in {
-                        'instance_id', 'card_id', 'name', 'identity', 'controller', 'power', 'toughness',
-                        'tapped', 'summoning_sick', 'attack_state', 'block_state', 'target_instance_ids',
-                        'source_card_id', 'object_type', 'ability_id', 'source_name'}})
+                    # snapshot() already owns the player-visible whitelist.
+                    # Do not silently drop dynamic abilities or card types here.
+                    result.append(dict(card))
         return result
-    return {**{k: document[k] for k in ('event_seq', 'checked_at', 'live', 'ready_for_decision', 'fallback_reasons')},
-            **{k: state[k] for k in ('match_key', 'game_state_id', 'coverage', 'self_seat', 'turn', 'own_turn', 'players', 'pending_request')},
+    return {**{k: document[k] for k in ('event_seq', 'checked_at', 'live', 'caught_up', 'ready_for_decision',
+                                      'fallback_reasons', 'ready_for_action', 'action_blockers', 'waiting_on_current_request')},
+            **{k: state[k] for k in ('match_key', 'game_state_id', 'coverage', 'self_seat', 'turn', 'own_turn',
+                                    'players', 'pending_request', 'room_state', 'game_info', 'source_event_time')},
             'hand': cards('ZoneType_Hand', own=True), 'battlefield': cards('ZoneType_Battlefield'),
             'stack': cards('ZoneType_Stack'), 'self_artifact_count_observed': state['self_artifact_count_observed'],
+            'self_artifact_count_complete': state['self_artifact_count_complete'],
             'available_actions': state['available_actions'], 'last_scry': state['scry_history'][-1:]}
 
 
