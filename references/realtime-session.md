@@ -73,6 +73,8 @@ globalThis.actionResult = await matchSession.act(decisionPacket.token, {
 
 `inspectedX/Y` 必须来自刚检查的当前截图；坐标类型与校准遵循现有电脑后端。方法重读状态、检查 token 及预算，再由严格 `arena.act` 核对请求、游戏状态 ID、日志世代和输入就绪条件。一次绑定只发送一次输入，随即自动刷新；返回结果初始为未确认。
 
+动作日志自动携带玩家投影中已知的 `own_turn` 作为我方回合编号，以及当前实际 `turn.phase`；未知值写为 null，不从全局回合编号猜测。这样耗时报告能汇总已观察到的我方回合。`match_start/game_start` 与 `game_result` 仍需依既有对局记录流程按真实开始、结束证据写入，协调器不会自动补造这些事件。
+
 先检查 `actionResult.frame`，再记录这个具体步骤的实际效果：
 
 ```js
@@ -111,7 +113,7 @@ await matchSession.cancel("用户接管，取消当前意图");
 await matchSession.close("本局结束");
 ```
 
-`cancel` 使旧 token 和意图失效，可打断正在等待的 `next`；显式再调用 `next` 表示继续处理当前局面。`next({signal})` 也支持 `AbortSignal` 取消本次等待。`close` 永久停止这个对象并释放当前进程的所有权。已经交给操作后端的输入无法撤回；此时结果标为未知，不自动重放。关闭协调器不会终止监听进程，应另外按日志参考的 stop-file 流程结束监听。
+`cancel` 使旧 token 和意图失效，可打断正在等待的 `next`；显式再调用 `next` 表示继续处理当前局面。显式取消或关闭也会取消上一步已确认但尚可续行的意图，之后不能沿用其 ID；已确认步骤的真实 `last_result` 保留。普通请求或场面变化仍允许模型在重新检查后续行已确认意图。`next({signal})` 也支持 `AbortSignal` 取消本次等待。`close` 永久停止这个对象并释放当前进程的所有权。已经交给操作后端的输入无法撤回；此时结果标为未知，不自动重放。关闭协调器不会终止监听进程，应另外按日志参考的 stop-file 流程结束监听。
 
 ## 当前验证范围
 

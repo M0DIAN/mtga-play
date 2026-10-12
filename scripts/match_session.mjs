@@ -104,7 +104,7 @@ export async function createMatchSession(arena, options) {
     lastInvalidation = reason;
     if (intent?.status === 'bound') {
       intent.status = 'cancelled';
-      intent.last_result = { status: 'cancelled', note: reason };
+      intent.last_result ??= { status: 'cancelled', note: reason };
       queue({ type: 'intent_cancelled', intent: copy(intent), reason });
     }
   }
@@ -212,6 +212,10 @@ export async function createMatchSession(arena, options) {
       intent.status = 'cancelled';
       intent.last_result = { status: 'uncertain', note: reason };
       queue({ type: 'intent_cancelled', intent: copy(intent), reason, decision_seq: pending.decisionSeq });
+    } else if (intent?.status === 'confirmed') {
+      // Retire the future goal without rewriting the already observed step result.
+      intent.status = 'cancelled';
+      queue({ type: 'intent_cancelled', intent: copy(intent), reason });
     }
     pending = null;
     if (closing) closed = true;
@@ -314,6 +318,8 @@ export async function createMatchSession(arena, options) {
         let frame, executionError;
         try {
           frame = await arena.act(input, { stage: 'gameplay', chosen_action: intent.goal,
+            turn: Number.isInteger(before.view.own_turn) && before.view.own_turn >= 0 ? before.view.own_turn : null,
+            phase: before.view.turn?.phase ?? null,
             semantic_intent: copy(intent), session_token: token, expected_request: bound.expected });
         } catch (error) { executionError = String(error); }
         if (arena.lastDecisionSeq === priorDecision) {
@@ -343,12 +349,13 @@ export async function createMatchSession(arena, options) {
       return exclusive(async () => {
         if (!pending || pending.decisionSeq !== decisionSeq || arena.lastDecisionSeq !== decisionSeq ||
             generation !== arena.generation) return blocked('effect_review_mismatch');
-        const action = pending;
+        const action = pending, startEpoch = epoch;
         const state = await current();
-        if (closed || pending !== action) return blocked(closed ? 'session_closed' : 'effect_review_mismatch');
+        if (closed || epoch !== startEpoch || pending !== action) return blocked(closed ? 'session_closed' : 'effect_review_mismatch');
         if (status === 'confirmed' && (state.error || state.view.match_key !== action.matchKey || !arena.state ||
             candidate?.generation !== generation)) return blocked('effect_observation_unavailable');
         await arena.confirmEffect(status, note);
+        if (closed || epoch !== startEpoch || pending !== action) return blocked(closed ? 'session_closed' : 'effect_review_mismatch');
         intent.status = status;
         intent.last_result = { status, note, decision_seq: decisionSeq, generation };
         queue({ type: 'intent_result', intent: copy(intent) });

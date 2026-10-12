@@ -3,6 +3,9 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createArenaController } from '../scripts/arena_ui.mjs';
 import { createMatchSession } from '../scripts/match_session.mjs';
 
@@ -294,6 +297,68 @@ test('new post-input state may confirm an effect but cannot silently reuse that 
   assert.equal((await h.session.bind(next.token, { generation: fresh.generation,
     note: 'Fresh frame shows the new target request', intent: nextIntent })).ready_for_input, true);
   assert.deepEqual(h.calls, ['capture', 'click', 'capture', 'capture']);
+});
+
+test('explicit cancel and close retire a confirmed intent without changing its observed step result', async t => {
+  for (const operation of ['cancel', 'close']) {
+    const h = await setup(t);
+    const packet = await ready(h);
+    const acted = await h.session.act(packet.token, input);
+    await h.session.confirm({ ...acted, status: 'confirmed', note: 'The target prompt is visible.' });
+    const confirmed = h.session.intent;
+    await h.session[operation]('Discard the remaining goal');
+    assert.equal(h.session.intent.status, 'cancelled');
+    assert.deepEqual(h.session.intent.last_result, confirmed.last_result);
+    const cancelled = (await h.journal()).find(row => row.type === 'intent_cancelled' && row.intent.id === confirmed.id);
+    assert.deepEqual(cancelled.intent.last_result, confirmed.last_result);
+    if (operation === 'cancel') {
+      const next = await h.session.next({ timeoutMs: 0 });
+      const frame = await h.session.observe(next.token);
+      await assert.rejects(h.session.bind(next.token, { generation: frame.generation, note: 'Freshly reviewed frame',
+        intent: { ...intention, id: confirmed.id, step: 'select_target' } }), /Only an explicitly confirmed intent/);
+    } else assert.equal((await h.session.next({ timeoutMs: 0 })).reason, 'session_closed');
+    assert.equal(h.calls.filter(call => call === 'click').length, 1);
+  }
+});
+
+test('a late confirmEffect completion cannot restore an explicitly cancelled intent', async t => {
+  const h = await setup(t);
+  const packet = await ready(h);
+  const acted = await h.session.act(packet.token, input);
+  const original = h.arena.confirmEffect;
+  h.arena.confirmEffect = async (...args) => {
+    const result = await original(...args);
+    await h.session.cancel('Operator took control during confirmation');
+    return result;
+  };
+  const result = await h.session.confirm({ ...acted, status: 'confirmed', note: 'A new target prompt is visible.' });
+  assert.equal(result.reason, 'effect_review_mismatch');
+  assert.equal(h.session.intent.status, 'cancelled');
+  assert.equal(h.session.token, null);
+  const journal = await h.journal();
+  assert.equal(journal.filter(row => row.type === 'effect_verification').length, 1);
+  assert.equal(journal.filter(row => row.type === 'intent_result').length, 0);
+  assert.equal(h.calls.filter(call => call === 'click').length, 1);
+});
+
+test('session journal supplies known own-turn and actual phase to timing metrics without guessing unknown turns', async t => {
+  for (const ownTurn of [2, null]) {
+    const h = await setup(t, { initial: d => {
+      if (ownTurn === null) delete d.state.own_turn;
+      d.state.turn.phase = 'Phase_Main1';
+      d.state.turn.turnNumber = 17; // Global turn numbers must not replace own_turn.
+    } });
+    const packet = await ready(h);
+    await h.session.act(packet.token, input);
+    const journal = await h.journal();
+    const decision = journal.find(row => row.type === 'decision');
+    assert.equal(decision.turn, ownTurn);
+    assert.equal(decision.phase, 'Phase_Main1');
+    assert.equal(journal.some(row => ['match_start', 'game_result'].includes(row.type)), false);
+    const { stdout } = await promisify(execFile)(process.env.MTGA_PYTHON || 'python',
+      ['-B', '-X', 'utf8', fileURLToPath(new URL('../scripts/match_timing.py', import.meta.url)), '--session', h.directory]);
+    assert.deepEqual(JSON.parse(stdout).own_turns_observed, ownTurn === null ? [] : [2]);
+  }
 });
 
 test('execution uncertainty prevents automatic retry and is carried into the next decision', async t => {
