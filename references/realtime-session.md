@@ -4,7 +4,7 @@
 
 ## 前提与生命周期
 
-先依照 [实时日志状态](log-state.md) 启动本局监听，确认新的 `match_key`、完整基线、当前套牌和窗口；再按 [界面操作](ui-play.md) 创建 `requireExpectedRequest: true` 的 `arena`。只把该监听生成的玩家可见 `state.json` 交给协调器，不传原始 Player.log 或内部回放输入。
+先依照 [实时日志状态](log-state.md) 启动本局监听，确认本次 run 健康、当前 `match_key`、完整连续基线、当前套牌和窗口；再按 [界面操作](ui-play.md) 创建 `requireExpectedRequest: true` 的 `arena`。新开对局必须区别于此前旧局；续接用户授权的同一未结束对局时，创建新记录目录和协调器，重建并核对当前身份与画面，不重放旧 token/待执行动作，不要求另开一局以获取不同 key。只把该监听生成的玩家可见 `state.json` 交给协调器，不传原始 Player.log 或内部回放输入。
 
 通过普通 ESM 导入 `createMatchSession`，或使用 `repl_bootstrap.py` 输出的同名全局函数。以下变量均取自当前已创建的会话，不照抄历史路径、卡牌实例或像素坐标：
 

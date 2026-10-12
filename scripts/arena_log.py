@@ -85,6 +85,43 @@ class JsonFramer:
         return records
 
 
+def _match_key(match_id):
+    return (hashlib.sha256(match_id.encode()).hexdigest()[:16]
+            if isinstance(match_id, str) and match_id.strip() else None)
+
+
+def _game_match_key(message):
+    state = message.get('gameStateMessage')
+    info = state.get('gameInfo') if isinstance(state, dict) else None
+    return _match_key(info.get('matchID')) if isinstance(info, dict) else None
+
+
+def event_metadata(event):
+    """Diagnostic identity/order only; never copy a GRE payload or private cards."""
+    message = event.get('message')
+    message = message if isinstance(message, dict) else {}
+    state = message.get('gameStateMessage')
+    state = state if isinstance(state, dict) else {}
+    room = event.get('room')
+    room = room if isinstance(room, dict) else {}
+    recipients = message.get('systemSeatIds')
+    def identifier(value):
+        return value if _is_id(value) else None
+    def label(value, prefix):
+        return value if isinstance(value, str) and re.fullmatch(prefix + r'[A-Za-z0-9_]{1,80}', value) else None
+    room_key = room.get('match_key')
+    return {'event_kind': event.get('kind') if event.get('kind') in {'room', 'gre', 'client'} else 'unknown',
+            'message_type': label(message.get('type'), r'(?:GRE|Client)MessageType_'),
+            'system_seat_ids': list(recipients) if isinstance(recipients, list) and
+                all(_is_id(seat) and seat in (1, 2) for seat in recipients) else None,
+            'message_id': identifier(message.get('msgId')),
+            'game_state_type': label(state.get('type'), 'GameStateType_'),
+            'game_state_id': identifier(state.get('gameStateId', message.get('gameStateId'))),
+            'prev_game_state_id': identifier(state.get('prevGameStateId')),
+            'room_match_key': room_key if isinstance(room_key, str) and re.fullmatch(r'[0-9a-f]{16}', room_key) else None,
+            'game_match_key': _game_match_key(message)}
+
+
 def normalized_events(obj):
     """Whitelist envelopes, removing account identifiers and transactions."""
     stamp = timestamp_utc(obj.get('timestamp'))
@@ -92,7 +129,7 @@ def normalized_events(obj):
         info = obj['matchGameRoomStateChangedEvent'].get('gameRoomInfo', {})
         config = info.get('gameRoomConfig', {})
         yield {'kind': 'room', 'timestamp': stamp, 'room': {
-            'match_key': hashlib.sha256(str(config.get('matchId', '')).encode()).hexdigest()[:16],
+            'match_key': _match_key(config.get('matchId')),
             'state': info.get('stateType'), 'result': info.get('finalMatchResult')}}
     for message in obj.get('greToClientEvent', {}).get('greToClientMessages', []):
         yield {'kind': 'gre', 'timestamp': stamp, 'message': message}
@@ -115,6 +152,7 @@ class GameTracker:
 
     def reset(self, match_key=None):
         self.match_key = match_key
+        self.retired_match_keys = deque(maxlen=16)
         self.self_seat = self.configured_seat
         self.room_state = None
         self.game_info, self.players, self.turn = {}, {}, {}
@@ -137,6 +175,13 @@ class GameTracker:
         self.own_turn = 0
         self.last_own_global_turn = None
         self.event_count = 0
+
+    def change_match(self, match_key):
+        retired = self.retired_match_keys
+        if self.match_key is not None:
+            retired.append(self.match_key)
+        self.reset(match_key)
+        self.retired_match_keys = retired
 
     def zone_for(self, instance):
         obj = self.objects.get(instance, {})
@@ -346,18 +391,49 @@ class GameTracker:
     def process(self, event):
         if event['kind'] == 'room':
             room = event['room']
-            if room['match_key'] != self.match_key:
-                self.reset(room['match_key'])
+            match_key = room.get('match_key')
+            if not match_key:
+                # An unidentified room cannot reassign or reopen the previous
+                # match. A later explicit identity/full state must recover it.
+                gap = {'kind': 'missing_room_match_identity'}
+                if gap not in self.gaps:
+                    self.gaps.append(gap)
+                self.last_received_timestamp = event.get('timestamp') or self.last_received_timestamp
+                return [{'type': 'room_ignored', 'reason': 'match_identity_missing'}]
+            if match_key in self.retired_match_keys:
+                return [{'type': 'previous_match_ignored', 'match_key': match_key}]
+            if match_key != self.match_key:
+                self.change_match(match_key)
             self.room_state = room['state']
             self.last_received_timestamp = event.get('timestamp') or self.last_received_timestamp
             self.event_count += 1
             return [{'type': 'room', 'state': self.room_state}]
         message = event['message']
         recipients = message.get('systemSeatIds', [])
-        if event['kind'] == 'gre' and len(recipients) == 1 and self.self_seat is not None and recipients[0] != self.self_seat:
-            raise ValueError('Viewing seat disagrees with GRE recipient; refusing private-state projection')
-        if self.self_seat is None and event['kind'] == 'gre' and len(message.get('systemSeatIds', [])) == 1:
-            self.self_seat = message['systemSeatIds'][0]
+        changes = []
+        if event['kind'] == 'gre':
+            match_key = _game_match_key(message)
+            if match_key in self.retired_match_keys:
+                return [{'type': 'previous_match_ignored', 'match_key': match_key}]
+            new_match = match_key is not None and match_key != self.match_key
+            # Connect/settings/timer/UI envelopes do not project cards or
+            # requests. Their recipients must not pin the next match's seat.
+            projects_state = ('gameStateMessage' in message or
+                              message.get('type') == 'GREMessageType_GameStateMessage' or
+                              message.get('type', '').endswith('Req'))
+            seat = self.configured_seat if new_match else self.self_seat
+            if projects_state and len(recipients) == 1:
+                if not _is_id(recipients[0]) or recipients[0] not in (1, 2):
+                    raise ValueError('Invalid GRE viewing seat; refusing private-state projection')
+                if seat is not None and recipients[0] != seat:
+                    raise ValueError('Viewing seat disagrees with GRE recipient; refusing private-state projection')
+            # Identity must change before state-ID deduplication and private
+            # projection; a new game can reuse both a seat and state IDs.
+            if new_match:
+                self.change_match(match_key)
+                changes.append({'type': 'match_changed', 'match_key': match_key})
+            if self.self_seat is None and projects_state and len(recipients) == 1:
+                self.self_seat = recipients[0]
         self.last_received_timestamp = event.get('timestamp') or self.last_received_timestamp
         self.event_count += 1
         if event['kind'] == 'client':
@@ -381,7 +457,8 @@ class GameTracker:
             if self.pending and self.pending.get('msg_id') == message.get('respId'):
                 self.pending = None
             return changes
-        changes = self.apply_state(message['gameStateMessage'], event.get('timestamp')) if 'gameStateMessage' in message else []
+        if 'gameStateMessage' in message:
+            changes.extend(self.apply_state(message['gameStateMessage'], event.get('timestamp')))
         if message.get('type', '').endswith('Req') and self.self_seat in message.get('systemSeatIds', []):
             self.pending = self.prompt(message)
             if 'groupReq' in message:
@@ -439,9 +516,10 @@ class GameTracker:
 
 class LogFollower:
     """Poll only appended bytes; resets on truncation/replacement, bounded bootstrap."""
-    def __init__(self, path, max_bootstrap_bytes=64 * 1024 * 1024):
+    def __init__(self, path, max_bootstrap_bytes=64 * 1024 * 1024, *, start_at_end=False):
         self.path = Path(path)
         self.limit = max_bootstrap_bytes
+        self.start_at_end = start_at_end
         self.identity = None
         self.offset = 0
         self.framer = JsonFramer()
@@ -464,8 +542,10 @@ class LogFollower:
                 if self.anchor and check.read(len(self.anchor)) != self.anchor:
                     reset = True
         if reset:
+            first_poll = self.identity is None
             self.identity = identity
-            self.offset = max(0, stat.st_size - self.limit)
+            self.offset = (stat.st_size if first_poll and self.start_at_end else
+                           max(0, stat.st_size - self.limit))
             self.framer = JsonFramer(self.offset)
             self.generation += 1
             with self.path.open('rb') as check:
