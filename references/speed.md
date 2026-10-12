@@ -28,6 +28,8 @@ helper 自动记录输入调用、截图调用及从上一截图返回到下一�
 
 v0.4.5 的协调器捕获包含两侧只读状态采样，`capture_ms` 包含这两次读取及可选窗口恢复，不能当成纯截图 API 时间；`since_capture_ms` 从实际 `get_window_state` 返回起算，因此包括截图后的采样和后续调度。`session_frame_use.reused_input_refresh` 只表示复用已捕获的当前候选，不证明已节省多少秒。比较时保留全部额外观察、失败、恢复与长尾。
 
+v0.4.6 消除 `next()` 取消路径对剩余轮询暂停的依赖；默认轮询仍为 200ms，不以缩短固定延时换取更多状态读取。合成检查在 1000ms 轮询、暂停保持未完成时验证 abort/cancel/close 返回，并确认旧 token 失效及清理后可继续。历史记录没有取消延迟样本，不能给出实战节省秒数或整局提速比例；在途文件读取、事件循环调度和日志写入仍计入完整取消耗时。
+
 v0.4 优先读取报告的 `captures.unique_count`、`input_refresh_count` 与 `extra_observe_count`；它们按 `controller_id/generation` 识别同一截图，回退 observation/execution 只算一次输入刷新。旧记录无法唯一对应时总数为 null，并保留已确认下限与覆盖原因。`raw_observation_event_count` 是原始行数，旧 `standalone_observation_count` 仅为它的兼容别名，不能当作去重后的额外截图数。分布的 P95 使用 nearest-rank，即排序后第 `ceil(0.95*n)` 项；保留样本量和缺失指标说明，小样本不用于稳定性能结论。
 
 赛后运行：

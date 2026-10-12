@@ -8,7 +8,6 @@ import { assessReadiness } from './state_contract.mjs';
 const activeSessions = new Map();
 const activeSources = new Map();
 const copy = value => structuredClone(value);
-const delay = ms => new Promise(done => setTimeout(done, ms));
 // node_repl exposes node:path, but neither a process global nor node:process.
 // Use the native path implementation to preserve Windows case-insensitive
 // ownership and separator/dot normalization without weakening POSIX identity.
@@ -100,7 +99,7 @@ function semanticIntent(value, previous, id) {
 export async function createMatchSession(arena, options) {
   const { sessionId, logStatePath, pollMs = 200, maxAgeMs = 5000,
     decisionTimeoutMs = 30000, wallNow = () => Date.now(),
-    monotonicNow = () => performance.now(), sleep = delay, presentation = 'full' } = options ?? {};
+    monotonicNow = () => performance.now(), sleep, presentation = 'full' } = options ?? {};
   if (!['full', 'compact'].includes(presentation)) throw new Error('presentation must be full or compact');
   if (typeof sessionId !== 'string' || !sessionId.trim() || typeof logStatePath !== 'string' || !logStatePath.trim()) {
     throw new Error('Actual sessionId and player-projection logStatePath required');
@@ -122,10 +121,31 @@ export async function createMatchSession(arena, options) {
   let busy = false, closed = false, epoch = 0, serial = 0, intentSerial = 0;
   let matchKey = null, matchChanged = false, finalResult = null, lastFingerprint = null, lastInvalidation = null;
   let decision = null, binding = null, candidate = null, intent = null, pending = null;
+  let wakeWait = null;
   const notes = [];
   const queue = event => notes.push({ ...event, session_controller_id: arena.controllerId, session_instance_id: owner.id });
   const elapsed = start => Math.max(0, monotonicNow() - start);
   const blocked = (reason, extra = {}) => ({ status: 'blocked', reason, ...extra });
+
+  async function pause(ms, signal, startEpoch) {
+    let wake, timer;
+    const interrupted = new Promise(resolve => { wake = resolve; });
+    wakeWait = wake;
+    try {
+      signal?.addEventListener('abort', wake, { once: true });
+      if (closed || epoch !== startEpoch || signal?.aborted) return;
+      const sleeping = sleep === undefined
+        ? new Promise(resolve => { timer = setTimeout(resolve, ms); })
+        : sleep(ms);
+      // Injected sleepers cannot be cancelled here. Race attaches a rejection
+      // handler even when interruption wins, so late failure stays contained.
+      await Promise.race([sleeping, interrupted]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', wake);
+      if (wakeWait === wake) wakeWait = null;
+    }
+  }
 
   function invalidate(reason) {
     decision = null;
@@ -310,6 +330,7 @@ export async function createMatchSession(arena, options) {
     pending = null;
     if (closing) closed = true;
     queue({ type: closing ? 'session_closed' : 'session_cancelled', reason });
+    wakeWait?.();
     return blocked(closing ? 'session_closed' : 'cancelled', { detail: reason });
   }
 
@@ -327,17 +348,23 @@ export async function createMatchSession(arena, options) {
       const requestedEpoch = epoch;
       return exclusive(async () => {
         const start = monotonicNow(), startEpoch = requestedEpoch;
-        while (true) {
+        const interrupted = () => {
+          if (closed || epoch !== startEpoch) return blocked(closed ? 'session_closed' : 'cancelled');
           if (signal?.aborted) return interruption('wait_aborted');
-          if (closed || epoch !== startEpoch) return blocked(closed ? 'session_closed' : 'cancelled');
+          return null;
+        };
+        while (true) {
+          const beforeRead = interrupted();
+          if (beforeRead) return beforeRead;
           const state = await current();
-          if (closed || epoch !== startEpoch) return blocked(closed ? 'session_closed' : 'cancelled');
+          const afterRead = interrupted();
+          if (afterRead) return afterRead;
           const result = immediateNext(state);
           if (result) return result;
           const remaining = timeoutMs - elapsed(start);
           if (remaining <= 0) return { status: 'waiting', reason: state.readiness.ready_for_action ? 'no_new_decision' : 'not_our_request',
             token: decision?.token ?? null, waited_ms: elapsed(start), reasons: state.readiness.action_blockers };
-          await sleep(Math.min(pollMs, remaining));
+          await pause(Math.min(pollMs, remaining), signal, startEpoch);
         }
       });
     },
