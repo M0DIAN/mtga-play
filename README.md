@@ -2,7 +2,7 @@
 
 让 Codex 接管 MTGA 实时对局，依据玩家可见的场面变化及时判断，并快速、灵活、可靠地完成操作。
 
-本仓库由用户提供的 v0.3.5 skill 建立。当前开发版为 **v0.4.2**：依据明确的比赛 ID 处理跨局座位和基线，修正 watcher 异常收尾，增加轻量健康检查与开新局前从日志末尾监听的选项。增量日志、卡牌规则、单步界面操作和耗时统计继续服务实时接管主线；离线测试通过不代表已经完成真实客户端验收。
+本仓库由用户提供的 v0.3.5 skill 建立。当前开发版为 **v0.4.3**：修复受支持 REPL 中缺少 `process` 导致协调器创建失败，保持 Windows 文件别名独占检查，并加入实际开始输入前可运行的无输入协调器预检。增量日志、卡牌规则、单步界面操作和耗时统计继续服务实时接管主线；合成预检和离线测试通过不代表已经取得真实对局基线或完成真实客户端验收。
 
 ## 目前可以做什么
 
@@ -33,7 +33,7 @@
 优先使用统一入口，将输出放到**源码之外的全新目录**。以下路径是本机示例；使用当前可用的 Python 和 Node 可执行文件，不要求安装新运行时：
 
 ```powershell
-python -B -X utf8 tests/run_offline.py --output 'E:\MTGA\skill_evaluations\mtga-play\v0.4.2\本次评估\offline' --node 'C:\Program Files\nodejs\node.exe'
+python -B -X utf8 tests/run_offline.py --output 'E:\MTGA\skill_evaluations\mtga-play\v0.4.3\本次评估\offline' --node 'C:\Program Files\nodejs\node.exe'
 ```
 
 入口将子进程的 `MTGA_TEST_TMP` 指向本次输出目录下的 `test-tmp`，将 `MTGA_PYTHON` 设为启动入口的 Python。在正式测试前，使用实际 Python/Node 子进程验证该目录的创建、写入、追加、读取、重命名和删除。预检失败保留错误并停止，不修改权限、不静默换目录、不跳过失败用例。
@@ -47,6 +47,8 @@ Windows PowerShell 可用时，Python 测试会检查拖动轨迹的无输入模
 v0.4.0 的本机反馈中，两项 Python 测试在系统沙箱 Temp 写合成日志时被拒绝，另有 UI 测试留下 59 个临时文件。v0.4.1 修正后，本机离线 Python 57 项、JS 79 项及清理全部通过；唯一 Sparky 的 watcher 随后因接收座位冲突退出，对局未完成，异常也没有生成 summary。
 
 v0.4.2 的回归使用合成跨局顺序，覆盖 GRE 先于 room、同座位与状态编号重用、同 key room 不丢基线、迟到旧局身份、无身份及固定座位冲突、异常前后最终报告和健康检查。反馈未包含触发异常的原始 GRE，因此具体消息类型和顺序仍未知；没有明确新比赛身份的真正 state/Req 冲突继续停止，不猜测换局。真实未结束对局的续接、新局流程及实际响应时间仍须本机验证，不能用常规 Windows CI 替代。
+
+v0.4.3 的 `runReplPreflight({tempRoot})` 用真实文件系统、隔离合成投影和拒绝所有方法的后端，直接运行当前两个工厂的创建、独占、决策、取消、连续性拒绝、关闭及重新获取所有权，清理自身临时目录后返回证据。统一离线入口包含无 `process`、不可导入 `node:process` 的 ESM/bootstrap 回归和 Windows/POSIX 文件身份回归。实际调用方式及 `passed` 的有限含义见 [会话协调器](references/realtime-session.md)。
 
 CI 将 Python、JavaScript 和 Windows 验证分开并行，各作业超时为 10 分钟。超时值是执行上限，不是已经取得的实际时长保证。
 

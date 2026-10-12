@@ -20,7 +20,7 @@ def _module_source(filename, replacements):
 
 
 def bootstrap_source():
-    # Each helper gets its own lexical scope. Only the two factories are public;
+    # Each helper gets its own lexical scope. Factories and preflight are public;
     # the readiness function is shared by these exact bundled module versions.
     contract = _module_source("state_contract.mjs", {
         "export function assessReadiness(": "function assessReadiness(",
@@ -42,8 +42,8 @@ def bootstrap_source():
             "const { readFile } = await import('node:fs/promises');",
         "import { createHash, randomUUID } from 'node:crypto';":
             "const { createHash, randomUUID } = await import('node:crypto');",
-        "import { resolve } from 'node:path';":
-            "const { resolve } = await import('node:path');",
+        "import { resolve, sep } from 'node:path';":
+            "const { resolve, sep } = await import('node:path');",
         "import { performance } from 'node:perf_hooks';":
             "const { performance } = await import('node:perf_hooks');",
         "import { assessReadiness } from './state_contract.mjs';":
@@ -51,9 +51,24 @@ def bootstrap_source():
         "export async function createMatchSession(arena, options) {":
             "globalThis.createMatchSession = async function createMatchSession(arena, options) {",
     })
+    preflight = _module_source("repl_preflight.mjs", {
+        "import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';":
+            "const { mkdtemp, writeFile, readFile, rm, stat } = await import('node:fs/promises');",
+        "import { isAbsolute, join } from 'node:path';":
+            "const { isAbsolute, join } = await import('node:path');",
+        "import { createArenaController } from './arena_ui.mjs';":
+            "const createArenaController = mtgaCreateArenaController;",
+        "import { createMatchSession } from './match_session.mjs';":
+            "const createMatchSession = mtgaCreateMatchSession;",
+        "export async function runReplPreflight({ tempRoot } = {}) {":
+            "globalThis.runReplPreflight = async function runReplPreflight({ tempRoot } = {}) {",
+    })
     return ("{\nlet mtgaAssessReadiness;\n{\n" + contract
             + "mtgaAssessReadiness = assessReadiness;\n}\n{\n" + controller
-            + "}\n{\n" + session + "}\n}\n")
+            + "}\n{\n" + session + "}\n"
+            + "const mtgaCreateArenaController = globalThis.createArenaController;\n"
+            + "const mtgaCreateMatchSession = globalThis.createMatchSession;\n{\n"
+            + preflight + "}\n}\n")
 
 
 if __name__ == "__main__":

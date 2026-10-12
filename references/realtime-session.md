@@ -4,6 +4,20 @@
 
 ## 前提与生命周期
 
+在任何可能开始对局的实际输入前，先在本次受支持的 `node_repl` 中完成无输入协调器预检。普通 ESM 入口如下，路径替换为当前 checkout 与已有可写评估目录：
+
+```js
+var { runReplPreflight } = await import('file:///E:/MTGA/development/mtga-play/scripts/repl_preflight.mjs');
+globalThis.replPreflight = await runReplPreflight({
+  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.3/current-run'
+});
+console.log(JSON.stringify(replPreflight));
+```
+
+如果文件模块导入受限，依 [界面操作](ui-play.md) 生成并直接执行完整 bootstrap，再调用同名全局 `runReplPreflight`。不依赖 `process` 全局或 `node:process`，也不需要真实窗口或电脑后端。预检直接使用本次加载的 `createArenaController/createMatchSession`，在 `tempRoot` 内创建独有目录，写入合成玩家投影和动作日志，验证严格控制器身份、会话/文件独占、`next/cancel/close`、连续性拒绝、关闭后重新获取所有权及清理。所有后端方法都拒绝调用，预检也不截图、不读真实 `Player.log`。
+
+仅 `status === "passed"` 且 `backend_calls` 为空、`cleanup.removed === true` 表示本次 REPL 的合成检查通过。返回失败保留具体 `error` 或 `cleanup.errors`，不换临时目录继续，不进行开始输入。报告中的 `scope: "synthetic_no_input"` 和 `live_game_baseline_verified: false` 明确表示它没有核对真实游戏；通过后仍需以下监听健康、当前身份、完整连续基线、请求和画面检查。预检不会给真实状态补造就绪标记。
+
 先依照 [实时日志状态](log-state.md) 启动本局监听，确认本次 run 健康、当前 `match_key`、完整连续基线、当前套牌和窗口；再按 [界面操作](ui-play.md) 创建 `requireExpectedRequest: true` 的 `arena`。新开对局必须区别于此前旧局；续接用户授权的同一未结束对局时，创建新记录目录和协调器，重建并核对当前身份与画面，不重放旧 token/待执行动作，不要求另开一局以获取不同 key。只把该监听生成的玩家可见 `state.json` 交给协调器，不传原始 Player.log 或内部回放输入。
 
 通过普通 ESM 导入 `createMatchSession`，或使用 `repl_bootstrap.py` 输出的同名全局函数。以下变量均取自当前已创建的会话，不照抄历史路径、卡牌实例或像素坐标：
@@ -117,4 +131,4 @@ await matchSession.close("本局结束");
 
 ## 当前验证范围
 
-`node --test tests/test_match_session.mjs` 使用临时玩家投影文件、真实 `arena_ui` 控制器与模拟电脑后端，验证等待、状态变化、预算、绑定、自动提交、效果确认及取消。测试不启动 MTGA、不调用模型 API、不发送真实电脑输入。自动定位、整局策略和真实客户端响应时间仍需要后续接入验证。
+`node --test tests/test_match_session.mjs tests/test_repl_preflight.mjs` 使用临时玩家投影文件、真实 `arena_ui` 控制器与模拟电脑后端，验证等待、状态变化、预算、绑定、自动提交、效果确认及取消。另在没有 `process` 全局且拒绝 `node:process` 导入的沙箱中运行精确 ESM 与生成 bootstrap，覆盖 Windows 盘符/UNC 的大小写、分隔符和点路径别名以及 POSIX 大小写区别。测试不启动 MTGA、不调用模型 API、不发送真实电脑输入。自动定位、整局策略和真实客户端响应时间仍需要后续接入验证。

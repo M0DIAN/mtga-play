@@ -1,7 +1,7 @@
 /** Persistent REPL coordination; no model invocation, visual locator or background input. */
 import { readFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { assessReadiness } from './state_contract.mjs';
 
@@ -9,7 +9,10 @@ const activeSessions = new Map();
 const activeSources = new Map();
 const copy = value => structuredClone(value);
 const delay = ms => new Promise(done => setTimeout(done, ms));
-const pathKey = path => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+// node_repl exposes node:path, but neither a process global nor node:process.
+// Use the native path implementation to preserve Windows case-insensitive
+// ownership and separator/dot normalization without weakening POSIX identity.
+const pathKey = path => sep === '\\' ? resolve(path).toLowerCase() : resolve(path);
 
 function stableJSON(value) {
   if (Array.isArray(value)) return '[' + value.map(stableJSON).join(',') + ']';

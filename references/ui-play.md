@@ -10,7 +10,7 @@ v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局
 
 在已通过 `sky.list_apps()` 等方法取得当前 `gameWindow` 后：
 
-本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController` 和 `globalThis.createMatchSession`，共享本次加载的状态契约，不发送 UI 输入；之后使用下例的 options 创建控制器。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
+本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController`、`globalThis.createMatchSession` 和 `globalThis.runReplPreflight`，共享本次加载的状态契约，不发送 UI 输入。先按 [会话协调器](realtime-session.md) 调用 `runReplPreflight({tempRoot: '<已有可写评估目录的绝对路径>'})`，确认无输入合成检查与清理通过，再使用下例的 options 创建真实控制器；预检通过仍不表示真实基线已就绪。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
 
 ```js
 globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.0");

@@ -10,7 +10,7 @@
 python -B -X utf8 <skill>/scripts/track_state.py watch --log '<Player.log>' --start-at-end --output '<本局目录>/log_tracker' --stop-file '<本局目录>/stop_tracker' --cards '<本局目录>/card_records.jsonl' --cards '<本局目录>/related_cards.jsonl' --card-db '<当前官方Raw_CardDatabase_*.mtga>'
 ```
 
-`--start-at-end` 只适合尚未触发的新局：首次 poll 跳过已有历史，随后接收新增消息；日志截断/替换时仍按有界回溯恢复。确认 watcher 已实际发布本次 run 的健康状态，才触发开始按钮，避免新局消息落在初始跳过范围。它不提供已有对局基线。续接用户授权的进行中对局时，去掉该参数，使用默认最多64MiB回溯重建；不能仅因截图已经在局内就跳过基线要求。
+`--start-at-end` 只适合尚未触发的新局：首次 poll 跳过已有历史，随后接收新增消息；日志截断/替换时仍按有界回溯恢复。确认 watcher 已实际发布本次 run 的健康状态，并在本次 REPL 完成 [协调器无输入预检](realtime-session.md)，才触发开始按钮，避免新局消息落在初始跳过范围。两项预检都不提供已有对局基线。续接用户授权的进行中对局时，去掉该参数，使用默认最多64MiB回溯重建；不能仅因截图已经在局内就跳过基线要求。
 
 输出目录必须是新目录，每次运行独占，不覆盖旧回放。`watch` 持续运行至中断，优先通过终端工具的运行会话保持进程并保留 stdout/stderr 和退出码；若使用 Start-Process，记录 PID 及输出路径，必须核对实际产物和健康状态，不能把返回 PID 当作启动成功。`--duration-seconds N` 用于有限验证，默认0表示持续监听。不要因监听实现或离线验证自行开新对局。
 
