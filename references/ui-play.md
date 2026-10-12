@@ -2,7 +2,7 @@
 
 v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局对象管理决策版本、时限和帧绑定。本文件保留底层单步 API、校准与既往客户端证据。严格输入现已重算日志有效性；旧版只比较请求编号的说明和历史结果不代表当前完整门槛。
 
-先读 computer-use 的指导文档，使用 `node_repl` 中的 `@oai/sky`。从实际返回的 app/window 对象选唯一 MTGA 窗口，不能硬编码窗口句柄。截图自动展示后直接检查，不重复解码或输出像素来观察。
+先读 computer-use 的指导文档，使用 `node_repl` 中的 `@oai/sky`。从实际返回的 app/window 对象选唯一 MTGA 窗口，不能硬编码窗口句柄。截图自动展示后直接检查；仅在本任务明确需要当前帧局部细看时，使用下述只读裁剪，仍保留全图。
 
 ## 可复用记录器
 
@@ -10,12 +10,13 @@ v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局
 
 在已通过 `sky.list_apps()` 等方法取得当前 `gameWindow` 后：
 
-本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController` 和 `globalThis.createMatchSession`，共享本次加载的状态契约，不发送 UI 输入；之后使用下例的 options 创建控制器。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
+本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController`、`globalThis.createMatchSession`、`globalThis.cropCurrentFrame`、`globalThis.cropPNG` 和 `globalThis.runReplPreflight`，共享本次加载的状态契约，不发送 UI 输入。先按 [会话协调器](realtime-session.md) 调用 `runReplPreflight({tempRoot: '<已有可写评估目录的绝对路径>'})`，确认无输入合成检查与清理通过，再使用下例的 options 创建真实控制器；预检通过仍不表示真实基线已就绪。不要改试 data URL 模块导入、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 模块和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
 
 ```js
-globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.0");
+globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.5");
 globalThis.arena = await arenaModule.createArenaController(sky, {
   window: gameWindow,
+  activateBeforeCapture: true,
   sessionId: "本局实际 session_id",
   journalPath: "E:/MTGA/matches/本局目录/actions.jsonl",
   logStatePath: "E:/MTGA/matches/本局目录/log_tracker/state.json",
@@ -26,6 +27,8 @@ globalThis.arena = await arenaModule.createArenaController(sky, {
 await arena.observe();
 ```
 
+`activateBeforeCapture:true` 在每次捕获前调用受支持的 `sky.activate_window({window})`，window 始终来自实际选择/捕获返回值。激活或捕获失败都会清除可用帧；日志中的恢复完成只表示 API 已返回，不证明窗口持续在前台，原生拖动仍独立检查真实前台。
+
 停下来检查截图，并将相配的玩家视角请求保存为下文的 `locatingRequest`（定义见请求绑定段），再用另一调用执行一个输入：
 
 ```js
@@ -35,7 +38,7 @@ await arena.act(
 );
 ```
 
-坐标只是格式示例，实际必须来自刚检查的截图。`act` 消耗当前观察、发送一次输入并立即刷新；内部不猜测游戏效果。返回的截图就是下一次决策的观察，稳定清楚时无需重复 `observe()`。
+坐标只是格式示例，实际必须来自刚检查的截图。`act` 消耗当前观察、发送一次输入并立即刷新；内部不猜测游戏效果。协调器还检查截图两侧的完整状态证据，只在返回候选仍有效且模型检查后才复用为下一决策。底层 `arena.act` 未传只读采样器的刷新不具备这项自动复用资格。
 
 检查该帧后，在下一调用中将上一输入的效果确认与一个新输入一起记录：
 
@@ -94,6 +97,40 @@ helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`
 - 选择攻击者与确认攻击是两步。检查攻击数量与召唤失调，不能将“全部攻击”第一次点击当作已完成战斗。
 - 空格在首局未推进阶段。优先用当前截图中的“下一步/结束回合”按钮，并核对下一阶段文字。保留可用异能时客户端可能停留在伤害前优先权。
 
+## 当前帧的只读裁剪（v0.4.5）
+
+`scripts/frame_crop.mjs` 是当前截图的局部查看辅助，不识别卡牌或生成位置。模型先检查完整帧，再明确选择本帧 ROI；不得保存未来布局坐标。输入仅接受 `coordinateSpace: 'screenshot'` 的逻辑像素矩形；`controllerId/generation/screenshotId` 必须全部来自当前已返回帧。`Screenshot.url` 是实际图像 data URL，`width/height` 是可选逻辑尺寸，不能假定等于编码像素。缺少逻辑尺寸时拒绝；默认 PNG renderer 从字节头读取编码尺寸并返回比例、逻辑矩形及向外取整后的编码矩形。`originX/originY` 仅记录屏幕原点，不充当窗口输入校准。
+
+普通 ESM 导入如下；bootstrap 已导出同名函数，不需要再导入。变量矩形必须取自当前全图中实际需要细看的区域：
+
+```js
+var { cropCurrentFrame, cropPNG } = await import('file:///E:/MTGA/skills/mtga-play/scripts/frame_crop.mjs?v=0.4.5');
+var sourceGeneration = arena.generation;
+var shot = arena.state.screenshots.find(s => s.id === inspectedScreenshotId);
+var crop = await cropCurrentFrame(arena, {
+  controllerId: arena.controllerId, generation: sourceGeneration, screenshotId: shot.id,
+  coordinateSpace: 'screenshot',
+  rect: { x: inspectedLeft, y: inspectedTop, width: inspectedWidth, height: inspectedHeight }
+});
+await nodeRepl.emitImage(crop.image.url);
+// crop.full_frame 保留原图；crop.source / mapping / rect / pixelRect 保留完整来源与映射。
+```
+
+默认只支持有界（最多 16M 编码像素）、8 位、非交错 PNG，支持灰度、RGB、RGBA、灰度透明及 8 位调色板，并校验字节边界、CRC 与行过滤器。格式不支持时明确拒绝，不安装 OCR 或图像依赖。仅使用 Node 内置 `node:zlib`，不依赖 `Buffer` 全局或浏览器 canvas。
+
+可选第三个参数是可信的只读 renderer；参数**只有** `{url, pixelRect}`，不得调用电脑后端或修改会话。传自定义 renderer 时还须明确给出由实际图像确定的 `encodedSize: {width, height}`；返回 `{url, width, height}` 必须是该编码矩形的真实裁剪。以下是可运行的 PNG callback 示例（尺寸读取自前一次默认 PNG 路径，仍在同一当前 generation 内）：
+
+```js
+var callbackCrop = await cropCurrentFrame(arena, {
+  controllerId: crop.source.controllerId, generation: crop.source.generation,
+  screenshotId: crop.source.screenshotId, coordinateSpace: 'screenshot', rect: crop.rect,
+  encodedSize: { width: crop.mapping.encodedWidth, height: crop.mapping.encodedHeight }
+}, async ({url, pixelRect}) => cropPNG({url, pixelRect}));
+await nodeRepl.emitImage(callbackCrop.image.url);
+```
+
+调用前后都核对源帧对象、截图身份/字节/尺寸与 generation，异步 renderer 期间发生输入、失效或刷新即拒绝结果；有限值、正尺寸及逻辑/编码完整边界均验证。任意 callback 没有沙箱隔离，契约及尺寸检查不能证明一个不可信 callback 的内容正确。裁剪不刷新画面，不延长 token，不确认效果，不建立输入绑定；模型仍须检查完整上下文及最终返回图，后续输入继续使用已验证的窗口校准。离线像素回归和合成预检不代表真实 MTGA 截图格式已验收。
+
 ## 占卜与拖动
 
 记录占卜牌、顶/底区域和当前分区数量。用新截图的起点终点，向 `sky.drag` 传当前 `screenshotId`，对两端使用同一坐标映射。移动后必须看见分区或数量变化再确认牌序。
@@ -116,7 +153,44 @@ helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`
 # 当前会话已授权此后端时，才在同一参数后加 -Execute。
 ```
 
-预悬停150ms、按下后100ms、线性移动约500ms、终点停留150ms、松开；返回的 `actual_movement_ms` 只测移动段，实际整次输入更长。脚本不包含截图或日志循环，应由调用者记录 `decision` / `execution` / `effect_verification`。API成功不等于牌已移动，必须看见左底/右顶变化；能观察后续抓牌时再交叉核对。不要添加未被 sky API 支持的 duration 参数，也不要把本局许可推广到其他会话。
+预悬停150ms、按下后100ms、线性移动约500ms、终点停留150ms、松开；返回的 `actual_movement_ms` 只测移动段，实际整次输入更长。v0.4.4 使用下述事务自动记录决策与执行，画面效果仍由后续人工检查确认。API成功不等于牌已移动，必须看见左底/右顶变化；能观察后续抓牌时再交叉核对。不要添加未被 sky API 支持的 duration 参数，也不要把本局许可推广到其他会话。
+
+#### 隐藏启动与两阶段拖动（v0.4.4）
+
+当前会话明确授权此后端后，先 `await matchSession.cancel("进入限定拖动回退")`；再 `await arena.observe()`，检查这张新帧并冻结匹配请求。此窄事务仅处理正常日志仍完整、连续、当前受支持己方请求内的视觉控件盲区，使用与普通 gameplay 相同的请求/就绪检查，不能用于绕过缺口或不受支持请求。
+
+```js
+globalThis.dragPrepared = await arena.prepareTimedDrag(
+  {kind:"drag", from_x:inspectedFromX, from_y:inspectedFromY,
+   to_x:inspectedToX, to_y:inspectedToY, coordinateSpace:"screenshot"},
+  {stage:"gameplay", request_binding_mode:"visual_fallback", expected_request:locatingRequest,
+   chosen_action:"把已核对的占卜牌移到牌库底"}
+);
+```
+
+准备只验证并消耗当前帧，返回一次性 `ticket` 与已映射的 `mapped_input`；尚未发送输入。准备后暂停其它 arena 操作。在外部终端工具执行同一打包脚本，参数复制此 ticket 与映射后的数字；**不得在 node_repl 内启动 PowerShell**，不得将 GUI window.id 当 HWND：
+
+```powershell
+& '<skill>/scripts/timed_drag.ps1' -Hidden -Execute -ResultDirectory '<本次已有绝对目录>' `
+  -TransactionId '<dragPrepared.ticket>' -FromX <mapped.from_x> -FromY <mapped.from_y> `
+  -ToX <mapped.to_x> -ToY <mapped.to_y> -DurationMs 500
+```
+
+外层使用64位 PowerShell，隐藏子进程执行同脚本的原有 guards，不改变 ExecutionPolicy，不主动恢复焦点。它保存唯一 stdout/stderr/result 文件、子退出码、PID、时间戳、ticket 与坐标，父退出码保留子失败。终端工具长时间运行时保留并轮询同一工具会话，不强杀持有鼠标的 helper、不再启动第二份。启动错误也保留原始错误；若工具没有返回结果，结束事务时传 `null`，记录未知而非补造成功。
+
+将本次结构结果读为 `helperOutcome` 后，在 REPL 立即完成一次刷新：
+
+```js
+globalThis.dragResult = await arena.finishTimedDrag(dragPrepared.ticket, helperOutcome);
+```
+
+等待这次工具返回，实际检查展示的 `dragResult.frame`；确认执行及刷新均成功且画面显示预期变化后，下一次独立调用才记录真实效果：
+
+```js
+await arena.confirmEffect("confirmed", "新帧显示目标牌已进入底部分区。");
+```
+
+`finishTimedDrag` 只接受当前 ticket 一次，核对结果中的 ticket、坐标、exit 0 与解析后 `executed:true`；无论 helper 成败均只尝试一次捕获，并只写一条执行终态。仅执行及刷新成功返回 `sent_and_refreshed/unverified`。其余为 `uncertain`，原始结果和错误保留，部分输入是否发生为未知，后续禁止 `confirmed`；只能根据实际观察记录 `failed/uncertain`，不重试旧坐标。截图或终态写日志失败也清除可用帧。准备到完成的跨工具间隔单列 `external_dispatch_wait_ms`；`input_ms` 仅在 helper 起止时间可用时记录，包含启动、编译、guards 与输入，缺失为 null。
 
 第二局 `match_20261012_104243_11e431b7` 的 seq98–103、149–155、256–263 是成功证据；调度两张、占卜海岛和沼泽的实际移动分别约516.60、508.93、502.30、513.89ms。第4回合保留的硬光禁锢在第5回合正常抽到。第三次占卜保留两顶，直接点完成合法。实现参照 [MOUSEINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput) 与 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) 文档；该客户端证据不保证所有版本、DPI和窗口模式都可复用。
 

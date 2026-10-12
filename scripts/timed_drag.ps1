@@ -5,7 +5,10 @@ param(
     [Parameter(Mandatory)][int]$ToX,
     [Parameter(Mandatory)][int]$ToY,
     [ValidateRange(250,2000)][int]$DurationMs = 500,
-    [switch]$Execute
+    [switch]$Execute,
+    [switch]$Hidden,
+    [string]$ResultDirectory,
+    [string]$TransactionId
 )
 $ErrorActionPreference = 'Stop'
 # Narrow MTGA fallback. Use only when the current session authorizes this
@@ -22,6 +25,59 @@ foreach ($point in $path) {
     if ($point.x -lt 0 -or $point.x -ge 1920 -or $point.y -lt 0 -or $point.y -ge 1080) {
         throw 'Point outside MTGA client.'
     }
+}
+if ($Hidden) {
+    if (-not $Execute) { throw '-Hidden requires -Execute; use the ordinary no-input plan for trajectory checks.' }
+    if ([IntPtr]::Size -ne 8) { throw 'This validated helper requires 64-bit PowerShell.' }
+    $parsedTransactionId = [Guid]::Empty
+    if (-not [Guid]::TryParse($TransactionId, [ref]$parsedTransactionId)) {
+        throw '-Hidden requires the GUID ticket from prepareTimedDrag as -TransactionId.'
+    }
+    if (-not $ResultDirectory -or -not [IO.Path]::IsPathRooted($ResultDirectory) -or
+        -not (Test-Path -LiteralPath $ResultDirectory -PathType Container)) {
+        throw '-ResultDirectory must be an existing absolute directory.'
+    }
+    $resultRoot = (Resolve-Path -LiteralPath $ResultDirectory).ProviderPath
+    $runId = [Guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $resultRoot ($runId + '.stdout.txt')
+    $stderrPath = Join-Path $resultRoot ($runId + '.stderr.txt')
+    $resultPath = Join-Path $resultRoot ($runId + '.result.json')
+    $startedAt = [DateTime]::UtcNow.ToString('o')
+    $childProcess = $null
+    $childExitCode = $null
+    $launchError = $null
+    $timedOut = $false
+    try {
+        $powerShellPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $childArgs = @('-NoProfile', '-NonInteractive', '-File', ('"' + $PSCommandPath + '"'),
+            '-WindowHandle', $WindowHandle, '-FromX', $FromX, '-FromY', $FromY,
+            '-ToX', $ToX, '-ToY', $ToY, '-DurationMs', $DurationMs, '-Execute')
+        # Same guarded helper, without -Hidden. No policy change or foreground workaround.
+        $childProcess = Start-Process -FilePath $powerShellPath -ArgumentList $childArgs -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+        $null = $childProcess.Handle # Retain the process handle so ExitCode remains available after exit.
+        # Let the terminal retain/poll this invocation if slow. Killing the child
+        # could interrupt its finally block while the left button is held.
+        $childProcess.WaitForExit()
+        $childProcess.Refresh()
+        if ($childProcess.HasExited) { $childExitCode = $childProcess.ExitCode }
+    } catch { $launchError = ($_ | Out-String) }
+    $result = [pscustomobject]@{
+        transaction_id = $TransactionId
+        requested_coordinates = @{ from_x = $FromX; from_y = $FromY; to_x = $ToX; to_y = $ToY }
+        exit_code = $childExitCode
+        stdout = $(if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { '' })
+        stderr = $(if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { '' })
+        stdout_path = $stdoutPath; stderr_path = $stderrPath; result_path = $resultPath
+        pid = $(if ($childProcess) { $childProcess.Id } else { $null })
+        started_at = $startedAt; finished_at = [DateTime]::UtcNow.ToString('o')
+        launch_error = $launchError; timed_out = $timedOut
+    }
+    $resultJson = $result | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText($resultPath, $resultJson, [Text.UTF8Encoding]::new($false))
+    $resultJson
+    if ($launchError -or $null -eq $childExitCode) { exit 1 }
+    exit $childExitCode
 }
 if (-not $Execute) {
     [pscustomobject]@{executed=$false; duration_ms=$DurationMs; path=$path} |
