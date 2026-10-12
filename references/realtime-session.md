@@ -1,4 +1,4 @@
-# 实时会话协调器（v0.4.5）
+# 实时会话协调器（v0.4.6）
 
 `scripts/match_session.mjs` 把单局的状态版本、等待、思考预算、帧绑定和当前行动步骤保存在一个 REPL 对象中。它复用只读监听与 `arena_ui.mjs`，没有后台模型调用或自动视觉定位。每次实际输入仍由当前受支持的电脑操作后端执行，并立即返回一张新观察供 Codex 检查。
 
@@ -9,7 +9,7 @@
 ```js
 var { runReplPreflight } = await import('file:///E:/MTGA/development/mtga-play/scripts/repl_preflight.mjs');
 globalThis.replPreflight = await runReplPreflight({
-  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.5/current-run'
+  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.6/current-run'
 });
 console.log(JSON.stringify(replPreflight));
 ```
@@ -60,6 +60,12 @@ var detail = await matchSession.details(decisionPacket.token, { path, offset: 0,
 `details` 重读当前状态并检查 token 与预算，旧请求、隐藏区域和不存在的路径均不能读取；不截图、不刷新 token，不返回内部回放数据。
 
 `next` 默认最多等待 8 秒，允许 0～15 秒；没有新决策时只读状态文件，不截图、不输入、不反复调用模型。它不会在工具返回后自行唤醒 Codex。要继续等待，需要当前工作流再次调用 `next`。
+
+v0.4.6 保持默认 `pollMs: 200`（允许 10～1000ms），为当前轮询暂停增加中断唤醒。可选 `next({timeoutMs, signal})` 接受宿主提供的 AbortSignal；不要求 REPL 有 `AbortController` 全局。signal abort、`cancel()` 或 `close()` 都能结束暂停，无需等待剩余轮询周期。读取前、读取后及进入暂停时均检查中断；已关闭或取消的等待不会被旧 signal 重复取消或重新发布决策。
+
+默认计时器在提前唤醒后清除，abort 监听器在暂停结束及异常时移除。自定义 `sleep(ms)` 仍可用于离线注入，但会话只能停止等待其返回值，不能强制终止任意 callback；迟到的 resolve/reject 不恢复会话或触发重读，callback 自己仍负责其资源和外部副作用。不要在注入的 sleep 中操作游戏。当前在途文件读取和日志写入仍须完成，取消不是硬实时保证。
+
+`cancel/close` 可在 `next()` 尚未完成时发出；旧 token 和绑定立即失效，但操作独占仍由原 `next()` 保持到最终日志清理结束。保存并等待原 Promise 完成后再继续使用会话；close 后也须等它完成才可创建同源新对象。正常超时、状态变化、健康监听、30 秒默认决策预算和下一输入的显式帧绑定规则保持不变。
 
 ### 2. 观察与显式绑定
 
@@ -160,3 +166,5 @@ await matchSession.close("本局结束");
 ## 当前验证范围
 
 `node --test tests/test_match_session.mjs tests/test_arena_ui.mjs tests/test_frame_crop.mjs tests/test_repl_preflight.mjs` 使用临时玩家投影文件、真实控制器与模拟电脑后端，覆盖紧凑呈现、双侧采样、预算、绑定、确认及拒绝复用。有效 PNG 字节验证不同裁剪区域与来源失效。无 `process/Buffer` 全局的 ESM/bootstrap 沙箱保留身份与清理回归，新增 `node:zlib` 内置模块的只读 PNG 路径；预检仍零电脑后端调用，不验证真实截图或真实客户端。测试不启动 MTGA、不调用模型 API、不发送真实电脑输入。自动定位、整局策略和真实客户端响应时间仍需要后续接入验证。
+
+v0.4.6 的 `responsive-waits/responsive-bootstrap` 沙箱分别加载实际 ESM 源码与生成的 bootstrap，只替换文件接口和计时器，用内存玩家投影及可控未完成 sleep 验证取消不依赖下一次轮询到期、中断不追加状态读取；覆盖读取期间 abort、close 优先、独占清理、迟到拒绝与正常计时器超时。该上下文也没有 `AbortController` 全局。结果是合成取消路径证据，不是客户端响应时间测量。

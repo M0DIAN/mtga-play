@@ -39,15 +39,21 @@ test('preflight reports unavailable scratch paths and never falls back', async t
   assert.deepEqual(await readdir(tempRoot), ['file']);
 });
 
-for (const mode of ['esm', 'bootstrap', 'path-identity']) {
+for (const mode of ['esm', 'bootstrap', 'path-identity', 'responsive-waits', 'responsive-bootstrap']) {
   test(`${mode} works without process global or node:process in supported REPL sandbox`, async t => {
     const tempRoot = await makeTestDirectory(t, 'mtga-repl-sandbox-');
     const bootstrapPath = join(tempRoot, 'bootstrap.mjs');
-    if (mode === 'bootstrap') {
+    if (mode === 'bootstrap' || mode === 'responsive-bootstrap') {
       const generator = fileURLToPath(new URL('../scripts/repl_bootstrap.py', import.meta.url));
       const { stdout } = await exec(process.env.MTGA_PYTHON || 'python', ['-B', '-X', 'utf8', generator]);
       await writeFile(bootstrapPath, stdout, 'utf8');
     }
-    await exec(process.execPath, ['--experimental-vm-modules', runner, mode, tempRoot, bootstrapPath]);
+    const { stdout } = await exec(process.execPath, ['--experimental-vm-modules', runner, mode, tempRoot, bootstrapPath]);
+    if (mode.startsWith('responsive-')) {
+      const report = JSON.parse(stdout);
+      assert.equal(report.scope, 'synthetic_no_input');
+      assert.equal(report.checks.length, 13);
+      t.diagnostic(stdout);
+    }
   });
 }

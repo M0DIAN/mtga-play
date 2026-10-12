@@ -19,6 +19,8 @@ description: Operate or coach Magic The Gathering Arena (MTGA) matches using pla
 
 实时对局优先读取 [会话协调器](references/realtime-session.md)，为本局创建唯一 `createMatchSession` 对象。用 `next` 等待需要处理的变化；模型负责打法与画面核对，会话负责 token、时限、帧绑定及单步记录。不要把后台监听当作后台模型调用；当前协调器不自动识别所有牌位。旧 token 失效时重新读取决策包，不替换其中版本字段后继续旧操作。
 
+v0.4.6 的 `next({signal})` 可使用宿主提供的 AbortSignal；`cancel/close` 也会唤醒当前轮询暂停，无需调低 `pollMs`。中断仍使旧 token/绑定失效，不输入、不截图。等待原 `next()` 完成日志清理后再调用下一操作；它不强制终止在途文件读取或日志写入，也不假定 REPL 有 `AbortController` 全局。
+
 v0.4.5 快速对局使用 `presentation: 'compact'`：按 `card_ref` 读取同包 `card_catalog`，完整规则按 `detail_path` 用 `details(token, {path, offset, limit})` 有界读取，未读完则继续下一页。所有选择、目标与费用约束保留，不能把详情引用当成无规则。只在返回的 `frame_reuse` 或有效 `candidate_token` 明确指向当前帧时省去额外观察；仍先检查完整截图的请求与动画，再确认效果并显式绑定下一步。可在已看图后的 `confirm({..., next:true})` 中合并记账与读取下一决策，不截图、不输入、不自动绑定。当前帧的 `cropCurrentFrame` 仅帮助查看已观察区域，来源、边界和逻辑/编码像素映射须有效；裁剪不替代全图或产生输入授权。
 
 执行 Windows 操作前，加载可用的 `computer-use` skill 并遵守其初始化、目标窗口和刷新流程。默认通过其 API 操作；若当前会话已经明确授权连续拖动后端例外，可按 [界面操作](references/ui-play.md) 使用本机限定的拖动 helper。保存脚本本身不代表已获使用权限。
