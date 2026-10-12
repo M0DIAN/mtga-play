@@ -13,9 +13,10 @@ v0.4 实时路径优先使用 [会话协调器](realtime-session.md)，让单局
 本机 node_repl 若对文件模块导入报 `realpath EPERM`，直接用终端工具运行 `python -B -X utf8 <skill>/scripts/repl_bootstrap.py`，读取输出，再将这段完整可信源码作为下一条 node_repl JS 代码运行。它定义 `globalThis.createArenaController`、`globalThis.createMatchSession` 和 `globalThis.runReplPreflight`，共享本次加载的状态契约，不发送 UI 输入。先按 [会话协调器](realtime-session.md) 调用 `runReplPreflight({tempRoot: '<已有可写评估目录的绝对路径>'})`，确认无输入合成检查与清理通过，再使用下例的 options 创建真实控制器；预检通过仍不表示真实基线已就绪。不要改试 data URL、`eval` 或 `new Function`：本机 REPL 分别不支持 data URL 和字符串代码生成。生成器直接复用同一组 helper，避免另写不一致的记录器。
 
 ```js
-globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.0");
+globalThis.arenaModule = await import("file:///E:/MTGA/skills/mtga-play/scripts/arena_ui.mjs?v=0.4.4");
 globalThis.arena = await arenaModule.createArenaController(sky, {
   window: gameWindow,
+  activateBeforeCapture: true,
   sessionId: "本局实际 session_id",
   journalPath: "E:/MTGA/matches/本局目录/actions.jsonl",
   logStatePath: "E:/MTGA/matches/本局目录/log_tracker/state.json",
@@ -25,6 +26,8 @@ globalThis.arena = await arenaModule.createArenaController(sky, {
 });
 await arena.observe();
 ```
+
+`activateBeforeCapture:true` 在每次捕获前调用受支持的 `sky.activate_window({window})`，window 始终来自实际选择/捕获返回值。激活或捕获失败都会清除可用帧；日志中的恢复完成只表示 API 已返回，不证明窗口持续在前台，原生拖动仍独立检查真实前台。
 
 停下来检查截图，并将相配的玩家视角请求保存为下文的 `locatingRequest`（定义见请求绑定段），再用另一调用执行一个输入：
 
@@ -116,7 +119,44 @@ helper 在事件中记录单调时钟的 `timing`：决策的 `since_capture_ms`
 # 当前会话已授权此后端时，才在同一参数后加 -Execute。
 ```
 
-预悬停150ms、按下后100ms、线性移动约500ms、终点停留150ms、松开；返回的 `actual_movement_ms` 只测移动段，实际整次输入更长。脚本不包含截图或日志循环，应由调用者记录 `decision` / `execution` / `effect_verification`。API成功不等于牌已移动，必须看见左底/右顶变化；能观察后续抓牌时再交叉核对。不要添加未被 sky API 支持的 duration 参数，也不要把本局许可推广到其他会话。
+预悬停150ms、按下后100ms、线性移动约500ms、终点停留150ms、松开；返回的 `actual_movement_ms` 只测移动段，实际整次输入更长。v0.4.4 使用下述事务自动记录决策与执行，画面效果仍由后续人工检查确认。API成功不等于牌已移动，必须看见左底/右顶变化；能观察后续抓牌时再交叉核对。不要添加未被 sky API 支持的 duration 参数，也不要把本局许可推广到其他会话。
+
+#### 隐藏启动与两阶段拖动（v0.4.4）
+
+当前会话明确授权此后端后，先 `await matchSession.cancel("进入限定拖动回退")`；再 `await arena.observe()`，检查这张新帧并冻结匹配请求。此窄事务仅处理正常日志仍完整、连续、当前受支持己方请求内的视觉控件盲区，使用与普通 gameplay 相同的请求/就绪检查，不能用于绕过缺口或不受支持请求。
+
+```js
+globalThis.dragPrepared = await arena.prepareTimedDrag(
+  {kind:"drag", from_x:inspectedFromX, from_y:inspectedFromY,
+   to_x:inspectedToX, to_y:inspectedToY, coordinateSpace:"screenshot"},
+  {stage:"gameplay", request_binding_mode:"visual_fallback", expected_request:locatingRequest,
+   chosen_action:"把已核对的占卜牌移到牌库底"}
+);
+```
+
+准备只验证并消耗当前帧，返回一次性 `ticket` 与已映射的 `mapped_input`；尚未发送输入。准备后暂停其它 arena 操作。在外部终端工具执行同一打包脚本，参数复制此 ticket 与映射后的数字；**不得在 node_repl 内启动 PowerShell**，不得将 GUI window.id 当 HWND：
+
+```powershell
+& '<skill>/scripts/timed_drag.ps1' -Hidden -Execute -ResultDirectory '<本次已有绝对目录>' `
+  -TransactionId '<dragPrepared.ticket>' -FromX <mapped.from_x> -FromY <mapped.from_y> `
+  -ToX <mapped.to_x> -ToY <mapped.to_y> -DurationMs 500
+```
+
+外层使用64位 PowerShell，隐藏子进程执行同脚本的原有 guards，不改变 ExecutionPolicy，不主动恢复焦点。它保存唯一 stdout/stderr/result 文件、子退出码、PID、时间戳、ticket 与坐标，父退出码保留子失败。终端工具长时间运行时保留并轮询同一工具会话，不强杀持有鼠标的 helper、不再启动第二份。启动错误也保留原始错误；若工具没有返回结果，结束事务时传 `null`，记录未知而非补造成功。
+
+将本次结构结果读为 `helperOutcome` 后，在 REPL 立即完成一次刷新：
+
+```js
+globalThis.dragResult = await arena.finishTimedDrag(dragPrepared.ticket, helperOutcome);
+```
+
+等待这次工具返回，实际检查展示的 `dragResult.frame`；确认执行及刷新均成功且画面显示预期变化后，下一次独立调用才记录真实效果：
+
+```js
+await arena.confirmEffect("confirmed", "新帧显示目标牌已进入底部分区。");
+```
+
+`finishTimedDrag` 只接受当前 ticket 一次，核对结果中的 ticket、坐标、exit 0 与解析后 `executed:true`；无论 helper 成败均只尝试一次捕获，并只写一条执行终态。仅执行及刷新成功返回 `sent_and_refreshed/unverified`。其余为 `uncertain`，原始结果和错误保留，部分输入是否发生为未知，后续禁止 `confirmed`；只能根据实际观察记录 `failed/uncertain`，不重试旧坐标。截图或终态写日志失败也清除可用帧。准备到完成的跨工具间隔单列 `external_dispatch_wait_ms`；`input_ms` 仅在 helper 起止时间可用时记录，包含启动、编译、guards 与输入，缺失为 null。
 
 第二局 `match_20261012_104243_11e431b7` 的 seq98–103、149–155、256–263 是成功证据；调度两张、占卜海岛和沼泽的实际移动分别约516.60、508.93、502.30、513.89ms。第4回合保留的硬光禁锢在第5回合正常抽到。第三次占卜保留两顶，直接点完成合法。实现参照 [MOUSEINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput) 与 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) 文档；该客户端证据不保证所有版本、DPI和窗口模式都可复用。
 

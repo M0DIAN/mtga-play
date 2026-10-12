@@ -18,6 +18,12 @@ export async function createArenaController(sky, options) {
   if (options.requireExpectedRequest && !options.logStatePath) {
     throw new Error('requireExpectedRequest requires logStatePath');
   }
+  if (options.activateBeforeCapture !== undefined && typeof options.activateBeforeCapture !== 'boolean') {
+    throw new Error('activateBeforeCapture must be boolean');
+  }
+  if (options.activateBeforeCapture && typeof sky.activate_window !== 'function') {
+    throw new Error('activateBeforeCapture requires supported sky.activate_window');
+  }
   let previous = '';
   try { previous = await readFile(journalPath, 'utf8'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -27,6 +33,7 @@ export async function createArenaController(sky, options) {
   }
   let sequence = events.length, state = null, generation = 0, pendingDecision = null, busy = false;
   let capturedAt = null, captureMs = null;
+  let focusRestoration = null, timedDrag = null, failedTimedDrag = false;
   const elapsed = start => Math.max(0, Math.round((monotonicNow() - start) * 1000) / 1000);
 
   async function record(event) {
@@ -37,8 +44,9 @@ export async function createArenaController(sky, options) {
     return seq;
   }
 
-  async function exclusive(work) {
+  async function exclusive(work, finishTimedDrag = false) {
     if (busy) throw new Error('Concurrent controller operation refused');
+    if (timedDrag && !finishTimedDrag) throw new Error('Timed drag outstanding; finish its ticket before further operations');
     busy = true;
     try { return await work(); } finally { busy = false; }
   }
@@ -47,6 +55,15 @@ export async function createArenaController(sky, options) {
     state = null;
     capturedAt = null;
     const started = monotonicNow();
+    focusRestoration = null;
+    if (options.activateBeforeCapture) {
+      focusRestoration = { attempted: true, method: 'sky.activate_window', completed: false,
+        foreground_verified: false, window_id: window.id };
+      try {
+        await sky.activate_window({ window });
+        focusRestoration.completed = true;
+      } catch (error) { focusRestoration.error = String(error); throw error; }
+    }
     const next = await sky.get_window_state({ window });
     captureMs = elapsed(started);
     capturedAt = monotonicNow();
@@ -118,6 +135,7 @@ export async function createArenaController(sky, options) {
       throw new Error('Effect review does not match the current decision and observation generation');
     }
     if (status === 'confirmed' && !state) throw new Error('Fresh post-input observation required');
+    if (status === 'confirmed' && failedTimedDrag) throw new Error('Uncertain timed drag execution cannot be confirmed successful');
     return { type: 'effect_verification', decision_seq: pendingDecision,
       generation, effect_status: status, observation: note, method: 'agent_screen_review' };
   }
@@ -212,7 +230,10 @@ export async function createArenaController(sky, options) {
     get lastDecisionSeq() { return pendingDecision; },
     get generation() { return generation; },
     get sequence() { return sequence; },
-    invalidate() { state = null; capturedAt = null; },
+    invalidate() {
+      if (timedDrag) throw new Error('Timed drag outstanding; finish its ticket before invalidation');
+      state = null; capturedAt = null;
+    },
     async waitForProgress(before, config) {
       return exclusive(() => waitForProgress(before, config));
     },
@@ -222,9 +243,15 @@ export async function createArenaController(sky, options) {
     },
     async observe() {
       return exclusive(async () => {
-        const next = await capture();
+        let next;
+        try { next = await capture(); }
+        catch (error) {
+          await record({ type: 'observation_failed', error: String(error), focus_restoration: focusRestoration });
+          throw error;
+        }
         await record({ type: 'observation', generation,
           timing: { capture_ms: captureMs },
+          ...(focusRestoration ? { focus_restoration: focusRestoration } : {}),
           screenshots: (next.screenshots ?? []).map(({ id, width, height }) => ({ id, width, height })) });
         return next;
       });
@@ -255,6 +282,7 @@ export async function createArenaController(sky, options) {
         pendingDecision = await record({ ...decision, type: 'decision', input,
           mapped_input: { method: dispatch.method, params: dispatch.params }, generation: observedGeneration,
           timing: { since_capture_ms: sinceCaptureMs }, execution: 'attempting' });
+        failedTimedDrag = false;
         let inputMs = null;
         try {
           const inputStarted = monotonicNow();
@@ -263,6 +291,7 @@ export async function createArenaController(sky, options) {
           const next = await capture();
           await record({ type: 'execution', decision_seq: pendingDecision, generation,
             timing: { input_ms: inputMs, capture_ms: captureMs, action_cycle_ms: elapsed(cycleStarted) },
+            ...(focusRestoration ? { focus_restoration: focusRestoration } : {}),
             execution: 'sent_and_refreshed', effect_status: 'unverified' });
           return next;
         } catch (error) {
@@ -270,10 +299,87 @@ export async function createArenaController(sky, options) {
           capturedAt = null;
           await record({ type: 'execution', decision_seq: pendingDecision,
             timing: { input_ms: inputMs, action_cycle_ms: elapsed(cycleStarted) },
-            execution: 'uncertain', error: String(error) });
+            execution: 'uncertain', error: String(error),
+            ...(focusRestoration ? { focus_restoration: focusRestoration } : {}) });
           throw error;
         }
       });
+    },
+    async prepareTimedDrag(input, decision) {
+      return exclusive(async () => {
+        if (!state) throw new Error('No fresh observation; observe and inspect before input');
+        if (input?.kind !== 'drag' || decision?.stage !== 'gameplay'
+            || decision?.request_binding_mode !== 'visual_fallback' || !decision?.chosen_action) {
+          throw new Error('Timed drag requires explicit gameplay visual_fallback drag and semantic intention');
+        }
+        if (decision.expected_request === undefined) {
+          state = null; capturedAt = null;
+          await record({ type: 'input_blocked', reason: 'missing_expected_request' });
+          throw new Error('Gameplay requires a request bound to the inspected frame');
+        }
+        await checkExpectedRequest(decision.expected_request);
+        const dispatch = dispatchFor(input);
+        const shot = screenshotFor(input);
+        if (shot.width !== 1920 || shot.height !== 1080) throw new Error('Timed drag requires 1920x1080 client calibration');
+        const started = monotonicNow(), observedGeneration = generation;
+        const sinceCaptureMs = elapsed(capturedAt);
+        state = null; capturedAt = null;
+        failedTimedDrag = true; // No optimistic confirmation before a successful finish.
+        pendingDecision = await record({ ...decision, type: 'decision', input,
+          mapped_input: { method: 'timed_drag.ps1', params: dispatch.params }, generation: observedGeneration,
+          timing: { since_capture_ms: sinceCaptureMs }, execution: 'attempting' });
+        const ticket = randomUUID();
+        const { from_x, from_y, to_x, to_y } = dispatch.params;
+        const mapped = { from_x, from_y, to_x, to_y };
+        timedDrag = { ticket, decisionSeq: pendingDecision, started, mapped };
+        return { ticket, decisionSeq: pendingDecision, mapped_input: { ...mapped } };
+      });
+    },
+    async finishTimedDrag(ticket, outcome) {
+      return exclusive(async () => {
+        if (!timedDrag || ticket !== timedDrag.ticket) throw new Error('Matching live timed drag ticket required');
+        const transaction = timedDrag;
+        // This ticket is consumed once, including malformed/missing helper results.
+        timedDrag = null;
+        let parsed = null, helperError = null;
+        try {
+          if (!outcome || typeof outcome !== 'object') throw new Error('Missing helper outcome');
+          if (outcome.transaction_id !== ticket || Object.entries(transaction.mapped)
+            .some(([key, value]) => outcome.requested_coordinates?.[key] !== value)) {
+            throw new Error('Helper outcome does not match this ticket and mapped coordinates');
+          }
+          if (typeof outcome.stdout !== 'string') throw new Error('Missing helper stdout');
+          parsed = JSON.parse(outcome.stdout);
+          if (outcome.exit_code !== 0 || parsed?.executed !== true || outcome.launch_error || outcome.timed_out) {
+            throw new Error('Helper did not report executed:true with exit code 0');
+          }
+        } catch (error) { helperError = String(error); }
+        const externalDispatchWaitMs = elapsed(transaction.started);
+        const helperStart = Date.parse(outcome?.started_at), helperEnd = Date.parse(outcome?.finished_at);
+        const inputMs = Number.isFinite(helperStart) && Number.isFinite(helperEnd) && helperEnd >= helperStart
+          ? helperEnd - helperStart : null;
+        let frame = null, captureError = null;
+        try { frame = await capture(); }
+        catch (error) { state = null; capturedAt = null; captureError = String(error); }
+        const execution = !helperError && !captureError ? 'sent_and_refreshed' : 'uncertain';
+        failedTimedDrag = execution !== 'sent_and_refreshed';
+        try { await record({ type: 'execution', decision_seq: transaction.decisionSeq, generation,
+          execution, effect_status: failedTimedDrag ? 'uncertain' : 'unverified',
+          input_may_have_been_sent: failedTimedDrag ? 'unknown' : true,
+          helper_outcome: outcome ?? null, helper_result: parsed, helper_error: helperError,
+          capture_error: captureError,
+          input_timing_scope: inputMs === null ? null : 'helper_launch_compile_guards_and_input',
+          timing: { input_ms: inputMs, external_dispatch_wait_ms: externalDispatchWaitMs,
+            capture_ms: captureError ? null : captureMs,
+            action_cycle_ms: elapsed(transaction.started) },
+          ...(focusRestoration ? { focus_restoration: focusRestoration } : {}) }); }
+        catch (error) {
+          state = null; capturedAt = null; failedTimedDrag = true;
+          throw error;
+        }
+        return { frame, execution, effect_status: failedTimedDrag ? 'uncertain' : 'unverified',
+          decisionSeq: transaction.decisionSeq, generation, helper_error: helperError, capture_error: captureError };
+      }, true);
     },
     async confirmEffect(status, note) {
       return exclusive(() => record(effectEvent(status, note, pendingDecision, generation)));

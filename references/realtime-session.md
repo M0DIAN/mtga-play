@@ -9,7 +9,7 @@
 ```js
 var { runReplPreflight } = await import('file:///E:/MTGA/development/mtga-play/scripts/repl_preflight.mjs');
 globalThis.replPreflight = await runReplPreflight({
-  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.3/current-run'
+  tempRoot: 'E:/MTGA/skill_evaluations/mtga-play/v0.4.4/current-run'
 });
 console.log(JSON.stringify(replPreflight));
 ```
