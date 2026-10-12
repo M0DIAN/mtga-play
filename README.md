@@ -2,7 +2,7 @@
 
 让 Codex 接管 MTGA 实时对局，依据玩家可见的场面变化及时判断，并快速、灵活、可靠地完成操作。
 
-本仓库由用户提供的 v0.3.5 skill 建立。当前开发版为 **v0.4.0**：复用增量日志、卡牌规则和单步界面操作，增加一致的状态检查、持续会话协调和可信的耗时统计。真实客户端的快速完整接管是开发主线；离线测试通过不代表已经达到该目标。
+本仓库由用户提供的 v0.3.5 skill 建立。当前开发版为 **v0.4.1**：在 v0.4 实时会话基础上修正本机验收的临时目录与清理，提供带文件预检的离线入口。增量日志、卡牌规则、单步界面操作和耗时统计继续服务实时接管主线；离线测试通过不代表已经完成真实客户端验收。
 
 ## 目前可以做什么
 
@@ -29,14 +29,25 @@
 
 代码使用 Python 标准库和 Node 内置模块，无需安装运行时第三方依赖。CI 基线为 Python 3.11、Node 24，同时检查 Windows 兼容性。
 
-```bash
-python -B -X utf8 -m unittest discover -s tests -p 'test_*.py' -v
-node --test tests/test_arena_ui.mjs tests/test_state_contract.mjs tests/test_match_session.mjs
+优先使用统一入口，将输出放到**源码之外的全新目录**。以下路径是本机示例；使用当前可用的 Python 和 Node 可执行文件，不要求安装新运行时：
+
+```powershell
+python -B -X utf8 tests/run_offline.py --output 'E:\MTGA\skill_evaluations\mtga-play\v0.4.1\本次评估\offline' --node 'C:\Program Files\nodejs\node.exe'
 ```
 
-Windows PowerShell 可用时，Python 测试会检查拖动轨迹的无输入模式；其它环境明确跳过这三项。全部 UI 自动测试使用 mock 后端，**不发送真实鼠标或键盘输入**。默认临时目录为 `.mtga-test-tmp/`，可通过 `MTGA_TEST_TMP` 指定。
+入口将子进程的 `MTGA_TEST_TMP` 指向本次输出目录下的 `test-tmp`，将 `MTGA_PYTHON` 设为启动入口的 Python。在正式测试前，使用实际 Python/Node 子进程验证该目录的创建、写入、追加、读取、重命名和删除。预检失败保留错误并停止，不修改权限、不静默换目录、不跳过失败用例。
+
+输出含 `offline-report.json`、各条命令的原始 stdout/stderr、退出码、进程耗时和清理状态。退出码 0 表示所选套件及清理通过，1 表示正式测试或清理未通过，2 表示预检/环境阻塞；结合原始异常判断原因。原始用例数量和失败/跳过项见 stdout/stderr，不把进程退出码等同于已验证实战。`--suite python` 或 `--suite javascript` 可只运行对应套件；后者仍预检 Python，因为 bootstrap 测试会调用它。
+
+单独运行测试时，所有文件 fixture 都遵守 `MTGA_TEST_TMP`；未设置时默认使用当前目录的 `.mtga-test-tmp/`。Python 与 JS 使用相同约定，已设置却不可用时直接失败。每个 fixture 仅删除自己创建的目录，异常初始化或会话关闭错误也会尝试清理；失败残留会明确报告，不删除历史记录。Windows 本机验收应使用上面的统一入口，避免把临时文件写回已安装的 skill。
+
+Windows PowerShell 可用时，Python 测试会检查拖动轨迹的无输入模式；其它环境明确跳过这三项。它们使用既有的子进程级 `-ExecutionPolicy Bypass` 参数，不持久修改策略；工具或组织策略阻止时应报告实际阻塞。全部 UI 自动测试使用 mock 后端，**不发送真实鼠标或键盘输入**。
+
+v0.4.0 的本机反馈中，两项 Python 测试在系统沙箱 Temp 写合成日志时被拒绝，尚未运行受测监听器；另有 UI 测试留下 59 个临时文件。v0.4.1 修正测试根不一致与未清理问题。能否在同一台 Codex 沙箱通过，以及随后的真实对局，仍须在本机验证；不能用常规 Windows CI 替代该证据。
 
 CI 将 Python、JavaScript 和 Windows 验证分开并行，各作业超时为 10 分钟。超时值是执行上限，不是已经取得的实际时长保证。
+
+每次新版交付包含版本 ZIP、对应 PowerShell 安装命令和 Codex 测试指令。安装包保留逐文件校验清单；验收报告区分源码文件变化与测试新增产物，保存原始错误及清理结果，再依据实际证据安排下一版。
 
 ## 来源与证据范围
 

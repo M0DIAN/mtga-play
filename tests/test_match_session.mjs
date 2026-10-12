@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createArenaController } from '../scripts/arena_ui.mjs';
 import { createMatchSession } from '../scripts/match_session.mjs';
+import { makeTestDirectory } from './temp_support.mjs';
 
 const input = { kind: 'click', x: 50, y: 100, coordinateSpace: 'window' };
 const intention = { goal: 'Cast the selected removal spell', step: 'select_card',
   expected_result: 'The target selection prompt appears', object_ids: [101, 202] };
 
 async function setup(t, options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'mtga-session-'));
+  let session;
+  const directory = await makeTestDirectory(t, 'mtga-session-', () => session?.close());
   const sessionId = basename(directory);
   const logStatePath = join(directory, 'state.json');
   let now = Date.parse('2026-10-12T08:30:00Z'), mono = 0, frame = 0;
@@ -69,9 +70,8 @@ async function setup(t, options = {}) {
   const config = { sessionId, logStatePath, decisionTimeoutMs: options.decisionTimeoutMs ?? 30000,
     wallNow: () => now, monotonicNow: () => mono,
     sleep: async ms => { context.advance(ms); await context.change(); if (options.onSleep) await options.onSleep(context); } };
-  const session = await createMatchSession(arena, config);
+  session = await createMatchSession(arena, config);
   Object.assign(context, { arena, session, config });
-  t.after(async () => { await session.close(); await rm(directory, { recursive: true, force: true }); });
   return context;
 }
 

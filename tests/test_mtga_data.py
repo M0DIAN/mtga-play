@@ -1,32 +1,15 @@
 import json
-import os
 import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
 import sys
-from tempfile import TemporaryDirectory
 import unittest
+from temp_support import test_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from mtga_data import (artifact_stats, build_training, eligible, normalize_cards,
                        parse_decks, read_log_tail, select_deck, state_issues,
                        validate_session, write_json, write_jsonl)
 from export_cards import read_db
-
-
-@contextmanager
-def test_directory():
-    root = Path(os.environ.get('MTGA_TEST_TMP', str(Path.cwd() / '.mtga-test-tmp'))).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    temporary = TemporaryDirectory(dir=root, prefix='mtga-test-')
-    candidate = Path(temporary.name).resolve()
-    if not candidate.is_relative_to(root):
-        raise ValueError('Test cleanup target escapes the explicit temporary root')
-    try:
-        yield temporary.name
-    finally:
-        # Verified absolute child of the explicitly chosen test root.
-        temporary.cleanup()
 
 
 def deck_line(identity='a', name='测试', quantity=4, request_string=True):
